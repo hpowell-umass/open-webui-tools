@@ -603,7 +603,7 @@ class Tools:
             "papers_metadata": papers_metadata,
         }
 
-    def _search_arxiv(self, search: arxiv.Search) -> List[arxiv.Result]:
+    def _search_arxiv(self, search) -> List:
         return list(self.client.results(search))
 
     async def search_papers(
