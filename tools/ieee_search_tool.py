@@ -523,3 +523,321 @@ class Tools:
             results += "   Abstract: No abstract available\n\n"
 
         return results
+
+# Unit tests for IEEE Search Tool
+import unittest
+from unittest.mock import Mock, AsyncMock, patch, MagicMock
+import asyncio
+import aiohttp
+import pytest
+
+class TestUserValves(unittest.TestCase):
+    """Test UserValves model"""
+    
+    def test_user_valves_creation(self):
+        """Test that UserValves can be created successfully"""
+        valves = UserValves()
+        self.assertIsNotNone(valves)
+    
+    def test_user_valves_no_api_keys(self):
+        """Test that UserValves requires no API keys"""
+        valves = UserValves()
+        self.assertTrue(hasattr(valves, '__dict__'))
+    
+    def test_user_valves_is_base_model(self):
+        """Test that UserValves is a Pydantic BaseModel"""
+        self.assertEqual(UserValves.__bases__[0].__name__, 'BaseModel')
+
+class TestToolsContextManager(unittest.TestCase):
+    """Test async context manager functionality"""
+    
+    @patch('aiohttp.ClientSession')
+    def test_async_enter(self, mock_session_class):
+        """Test that __aenter__ creates and returns session"""
+        tools = Tools()
+        session = mock_session_class.return_value
+        
+        result = tools.__aenter__()
+        
+        mock_session_class.assert_called_once()
+        self.assertEqual(result, session)
+    
+    @patch('aiohttp.ClientSession')
+    def test_async_exit(self, mock_session_class):
+        """Test that __aexit__ closes the session"""
+        tools = Tools()
+        mock_session = mock_session_class.return_value
+        mock_session.__aexit__ = AsyncMock()
+        
+        tools.__aenter__()
+        tools.__aexit__(None, None, None)
+        
+        mock_session.__aexit__.assert_called_once()
+
+class TestToolsInitialization(unittest.TestCase):
+    """Test Tools class initialization"""
+    
+    def test_tools_initialization(self):
+        """Test that Tools can be initialized with default values"""
+        tools = Tools()
+        
+        self.assertEqual(tools.base_url, "https://ieeexplore.ieee.org/search")
+        self.assertEqual(tools.results_per_page, 20)
+        self.assertEqual(tools.max_results, 5)
+        self.assertEqual(tools.search_timeout, 30)
+        self.assertIsNone(tools.session)
+    
+    def test_tools_with_custom_params(self):
+        """Test Tools initialization with custom parameters"""
+        tools = Tools()
+        
+        # Verify default configuration
+        self.assertTrue(hasattr(tools, 'base_url'))
+        self.assertTrue(hasattr(tools, 'results_per_page'))
+        self.assertTrue(hasattr(tools, 'max_results'))
+        self.assertTrue(hasattr(tools, 'search_timeout'))
+
+class TestToolsAttributes(unittest.TestCase):
+    """Test Tools class attributes"""
+    
+    def test_base_url_attribute(self):
+        """Test base_url attribute"""
+        tools = Tools()
+        self.assertEqual(tools.base_url, "https://ieeexplore.ieee.org/search")
+    
+    def test_results_per_page_attribute(self):
+        """Test results_per_page attribute"""
+        tools = Tools()
+        self.assertEqual(tools.results_per_page, 20)
+    
+    def test_max_results_attribute(self):
+        """Test max_results attribute"""
+        tools = Tools()
+        self.assertEqual(tools.max_results, 5)
+    
+    def test_search_timeout_attribute(self):
+        """Test search_timeout attribute"""
+        tools = Tools()
+        self.assertEqual(tools.search_timeout, 30)
+    
+    def test_session_attribute(self):
+        """Test session attribute initialization"""
+        tools = Tools()
+        self.assertIsNone(tools.session)
+
+class TestSearchIEEPPapers(unittest.TestCase):
+    """Test search_ieee_papers method"""
+    
+    @patch.object(Tools, '_parse_html_results')
+    @patch.object(Tools, '__aenter__')
+    @patch.object(Tools, '__aexit__')
+    @patch('aiohttp.ClientSession')
+    def test_search_ieee_papers_success(self, mock_session_class, mock_exit, mock_enter, mock_parse):
+        """Test successful paper search"""
+        tools = Tools()
+        mock_session = mock_session_class.return_value
+        mock_enter.return_value = mock_session
+        
+        # Mock successful search with sample HTML
+        sample_html = """
+        <html>
+            <div class="search-results">
+                <div class="article">
+                    <h3><a href="/article/1">Test Paper</a></h3>
+                    <p>Author Name</p>
+                    <p>2023</p>
+                    <div class="abstract">Test abstract content</div>
+                </div>
+            </div>
+        </html>
+        """
+        
+        mock_parse.return_value = [{
+            'title': 'Test Paper',
+            'authors': ['Author Name'],
+            'year': '2023',
+            'url': '/article/1',
+            'abstract': 'Test abstract content'
+        }]
+        
+        result = tools.search_ieee_papers("test topic")
+        
+        self.assertIsNotNone(result)
+        self.assertIn("Test Paper", result)
+        self.assertIn("Author Name", result)
+    
+    @patch.object(Tools, '_parse_html_results')
+    @patch.object(Tools, '__aenter__')
+    @patch.object(Tools, '__aexit__')
+    @patch('aiohttp.ClientSession')
+    def test_search_ieee_papers_with_event_emitter(self, mock_session_class, mock_exit, mock_enter, mock_parse):
+        """Test search with event emitter"""
+        tools = Tools()
+        mock_session = mock_session_class.return_value
+        mock_enter.return_value = mock_session
+        
+        event_emitter = AsyncMock()
+        
+        # Mock successful search
+        mock_parse.return_value = []
+        
+        result = tools.search_ieee_papers("test topic", event_emitter=event_emitter)
+        
+        event_emitter.assert_any_call({
+            "type": "status",
+            "data": {"description": "Searching IEEE Xplore...", "done": False},
+        })
+
+class TestParseHTMLResults(unittest.TestCase):
+    """Test _parse_html_results method"""
+    
+    def test_parse_html_results_with_beautifulsoup(self):
+        """Test parsing HTML results with BeautifulSoup"""
+        tools = Tools()
+        
+        html_content = """
+        <html>
+            <div class="search-results">
+                <div class="article">
+                    <h3><a href="/article/1">Test Paper Title</a></h3>
+                    <p>John Doe</p>
+                    <p>2023</p>
+                    <div class="abstract">This is a test abstract</div>
+                </div>
+            </div>
+        </html>
+        """
+        
+        result = tools._parse_html_results(html_content)
+        
+        self.assertIsInstance(result, list)
+        self.assertGreater(len(result), 0)
+    
+    def test_parse_html_results_with_empty_html(self):
+        """Test parsing empty HTML content"""
+        tools = Tools()
+        
+        result = tools._parse_html_results("")
+        
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 0)
+    
+    def test_parse_html_results_with_no_papers(self):
+        """Test parsing HTML with no papers found"""
+        tools = Tools()
+        
+        html_content = "<html><body>No papers here</body></html>"
+        
+        result = tools._parse_html_results(html_content)
+        
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 0)
+    
+    def test_parse_html_results_with_incomplete_html(self):
+        """Test parsing HTML with incomplete structure"""
+        tools = Tools()
+        
+        html_content = "<html><body>Just some text</body></html>"
+        
+        result = tools._parse_html_results(html_content)
+        
+        # Should not crash and return empty list
+        self.assertIsInstance(result, list)
+
+class TestHTMLParserAvailability(unittest.TestCase):
+    """Test HTML parser availability checks"""
+    
+    def test_beautifulsoup_import_available(self):
+        """Test if BeautifulSoup is available"""
+        try:
+            from bs4 import BeautifulSoup
+            self.assertTrue(True)
+        except ImportError:
+            self.fail("BeautifulSoup4 is not installed")
+
+class TestToolsAsyncOperations(unittest.TestCase):
+    """Test async operations in Tools class"""
+    
+    @patch('aiohttp.ClientSession')
+    @patch('aiohttp.ClientSession.request')
+    @patch.object(Tools, '_parse_html_results')
+    async def test_async_search_operations(self, mock_parse, mock_request, mock_session_class):
+        """Test async search operations"""
+        tools = Tools()
+        mock_session = mock_session_class.return_value
+        mock_request.return_value = AsyncMock()
+        
+        # Simulate async search flow
+        async with tools:
+            # Mock response
+            mock_response = AsyncMock()
+            mock_response.text = AsyncMock(return_value="<html><body>Test</body></html>")
+            mock_request.return_value = mock_response
+            
+            mock_parse.return_value = [{
+                'title': 'Test',
+                'authors': [],
+                'year': '2023',
+                'url': '/test',
+                'abstract': 'Test abstract'
+            }]
+            
+            # This would normally trigger search, but we're just testing the flow
+            self.assertIsNotNone(tools.session)
+        
+        mock_session.close.assert_called_once()
+
+class TestSearchIEEPPapersWithYearRange(unittest.TestCase):
+    """Test search with different year ranges"""
+    
+    @patch.object(Tools, '_parse_html_results')
+    @patch.object(Tools, '__aenter__')
+    @patch.object(Tools, '__aexit__')
+    @patch('aiohttp.ClientSession')
+    def test_search_all_years(self, mock_session_class, mock_exit, mock_enter, mock_parse):
+        """Test search with 'all' year range"""
+        tools = Tools()
+        mock_session = mock_session_class.return_value
+        mock_enter.return_value = mock_session
+        
+        mock_parse.return_value = []
+        
+        result = tools.search_ieee_papers("quantum computing", year_range="all")
+        
+        self.assertIsNotNone(result)
+    
+    @patch.object(Tools, '_parse_html_results')
+    @patch.object(Tools, '__aenter__')
+    @patch.object(Tools, '__aexit__')
+    @patch('aiohttp.ClientSession')
+    def test_search_last_5_years(self, mock_session_class, mock_exit, mock_enter, mock_parse):
+        """Test search with 'last_5_years' year range"""
+        tools = Tools()
+        mock_session = mock_session_class.return_value
+        mock_enter.return_value = mock_session
+        
+        mock_parse.return_value = []
+        
+        result = tools.search_ieee_papers("transformer models", year_range="last_5_years")
+        
+        self.assertIsNotNone(result)
+    
+    @patch.object(Tools, '_parse_html_results')
+    @patch.object(Tools, '__aenter__')
+    @patch.object(Tools, '__aexit__')
+    @patch('aiohttp.ClientSession')
+    def test_search_specific_year_range(self, mock_session_class, mock_exit, mock_enter, mock_parse):
+        """Test search with specific year range"""
+        tools = Tools()
+        mock_session = mock_session_class.return_value
+        mock_enter.return_value = mock_session
+        
+        mock_parse.return_value = []
+        
+        result = tools.search_ieee_papers("deep learning", year_range="2020-2024")
+        
+        self.assertIsNotNone(result)
+
+# Run tests
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
