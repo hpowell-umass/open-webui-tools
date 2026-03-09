@@ -675,3 +675,143 @@ class Tools:
                     {"type": "status", "data": {"description": error_msg, "done": True}}
                 )
             return error_msg
+
+
+import unittest
+import shutil
+
+class TestArXivTool(unittest.IsolatedAsyncioTestCase):
+    """Basic smoke / integration tests for the arXiv tool functionality"""
+
+    def setUp(self):
+        self.tools = Tools()
+        # Use a temporary directory for downloads during tests
+        self.test_download_dir = tempfile.mkdtemp()
+        self.tools.download_dir = self.test_download_dir
+
+    def tearDown(self):
+        # Clean up temporary directory after each test
+        if os.path.exists(self.test_download_dir):
+            shutil.rmtree(self.test_download_dir, ignore_errors=True)
+
+    async def test_search_papers_basic(self):
+        """Test that search_papers returns some formatted results"""
+        if not ARXIV_AVAILABLE:
+            self.skipTest("arxiv package not installed")
+
+        result = await self.tools.search_papers(
+            topic="attention is all you need",
+            __event_emitter__=None  # no emitter in tests
+        )
+
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 50, "Search should return meaningful content")
+        self.assertIn("Transformer", result, "Expected paper title fragment")
+        self.assertIn("URL:", result, "Expected URL field in output")
+
+    async def test_search_papers_no_results(self):
+        """Test behavior with very unlikely query"""
+        if not ARXIV_AVAILABLE:
+            self.skipTest("arxiv package not installed")
+
+        result = await self.tools.search_papers(
+            topic="this query should return zero papers 999999999xyz",
+            __event_emitter__=None
+        )
+
+        self.assertIn("No papers found", result)
+
+    @unittest.skipUnless(ARXIV_AVAILABLE and PDF_READER_AVAILABLE,
+                         "Requires both arxiv and PyMuPDF")
+    async def test_download_and_read_small_paper(self):
+        """Download a real small-ish paper and try to read its text"""
+        arxiv_id = "1706.03762"  # Attention Is All You Need (relatively short)
+
+        pdf_path = await self.tools.download_pdf(
+            arxiv_id=arxiv_id,
+            __event_emitter__=None
+        )
+
+        self.assertIsNotNone(pdf_path, "PDF should have been downloaded")
+        self.assertTrue(os.path.isfile(pdf_path), "Downloaded file should exist")
+
+        # Check filename contains title words (rough check)
+        filename = os.path.basename(pdf_path).lower()
+        self.assertTrue(any(word in filename for word in ["attention", "transformer"]))
+
+        text = await self.tools.read_pdf(pdf_path)
+        self.assertIsNotNone(text)
+        self.assertGreater(len(text), 2000, "Should extract substantial text")
+        self.assertIn("Transformer", text, "Expected content in extracted text")
+
+        # Cleanup
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+
+    @unittest.skipUnless(PDF_READER_AVAILABLE, "PyMuPDF not available")
+    async def test_sanitize_filename(self):
+        """Test filename sanitization logic"""
+        dirty = "Bad: Title /with\\ illegal*chars?.pdf"
+        clean = self.tools.sanitize_filename(dirty)
+
+        self.assertNotIn(":", clean)
+        self.assertNotIn("/", clean)
+        self.assertNotIn("\\", clean)
+        self.assertNotIn("*", clean)
+        self.assertTrue(clean.endswith(".pdf"))
+
+    @unittest.skipUnless(ARXIV_AVAILABLE and PDF_READER_AVAILABLE,
+                         "Requires arxiv + PyMuPDF")
+    async def test_search_and_download_integration(self):
+        """End-to-end test: search → download → basic analysis"""
+        result = await self.tools.search_and_download_papers(
+            topic="diffusion models",
+            num_papers=1,
+            analyze_images=False,           # skip heavy image processing
+            recursive_depth=0,              # skip recursion
+            __event_emitter__=None
+        )
+
+        self.assertIsInstance(result, dict)
+        self.assertIn("downloaded_files", result)
+        self.assertGreater(len(result["downloaded_files"]), 0)
+
+        pdf_path = result["downloaded_files"][0]
+        self.assertTrue(os.path.isfile(pdf_path))
+
+        # Minimal check that analysis ran
+        analysis = result["papers_metadata"][0]["analysis"]
+        self.assertIn("extracted_text", analysis)
+        self.assertGreater(len(analysis["extracted_text"]), 500)
+
+        # Cleanup
+        for f in result["downloaded_files"]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except:
+                    pass
+
+    async def test_extract_citations_smoke(self):
+        """Just check that citation extraction doesn't crash"""
+        fake_text = """
+        References
+        [1] Goodfellow et al. Generative Adversarial Nets. 2014.
+        [2] arXiv:2010.09876 Ho et al. Denoising Diffusion Probabilistic Models.
+        [3] Kingma & Welling. Auto-Encoding Variational Bayes. arXiv:1312.6114
+        """
+        citations = await self.tools.extract_citations(fake_text)
+
+        self.assertIsInstance(citations, list)
+        self.assertGreater(len(citations), 1)
+        self.assertTrue(any("2010.09876" in c for c in citations))
+
+
+if __name__ == "__main__":
+    print("Running arXiv Tool self-tests...")
+    print("Make sure 'arxiv' and 'pymupdf' are installed for full coverage.\n")
+
+    # Run asyncio-compatible unittest
+    asyncio.run(unittest.main())
+
+    print("\nTests completed.")
