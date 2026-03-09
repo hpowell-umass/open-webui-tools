@@ -1,19 +1,18 @@
 """
-title: arXiv Tool
-description: Tool to perform search for relevant papers on arXiv using the official arXiv API via the arxiv Python package, with PDF download and analysis capabilities, including image extraction and recursive citation search.
-author: Haervwe, Tan Yong Sheng
+title: Semantic Scholar Tool
+description: Tool to perform search for relevant papers on Semantic Scholar (covering journals like IEEE, Nature, ION, and top ML conferences/journals), with PDF download and analysis capabilities where open access is available, including image extraction and recursive citation search.
+author: Inspired by arXiv Tool
 author_urls:
   - https://github.com/Haervwe/
   - https://github.com/tan-yong-sheng/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.5
+version: 0.1.0
 """
 
 import aiohttp
 import asyncio
 from typing import Any, Optional, Callable, Awaitable, List, Dict
-from pydantic import BaseModel
-import urllib.parse
+from pydantic import BaseModel, ConfigDict
 import os
 import tempfile
 from pathlib import Path
@@ -32,11 +31,11 @@ except ImportError:
     logging.warning("PyMuPDF not available. PDF reading functionality will be limited.")
 
 try:
-    import arxiv
-    ARXIV_AVAILABLE = True
+    from semanticscholar import SemanticScholar
+    SEMANTIC_SCHOLAR_AVAILABLE = True
 except ImportError:
-    ARXIV_AVAILABLE = False
-    logging.warning("arxiv package not available. Please install it: pip install arxiv")
+    SEMANTIC_SCHOLAR_AVAILABLE = False
+    logging.warning("semanticscholar package not available. Please install it: pip install semanticscholar")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,16 +43,17 @@ logger = logging.getLogger(__name__)
 
 class Tools:
     class UserValves(BaseModel):
-        """No API keys required for arXiv search and PDF reading"""
+        """No API keys required for Semantic Scholar search and PDF reading"""
 
         pass
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     def __init__(self):
         self.max_results = 5
-        self.citation = False
-        self.download_dir = os.path.join(tempfile.gettempdir(), "arxiv_downloads")
-        if ARXIV_AVAILABLE:
-            self.client = arxiv.Client()
+        self.download_dir = os.path.join(tempfile.gettempdir(), "semanticscholar_downloads")
+        if SEMANTIC_SCHOLAR_AVAILABLE:
+            self.client = SemanticScholar()
 
     def sanitize_filename(self, filename: str) -> str:
         """
@@ -71,31 +71,18 @@ class Tools:
             filename += '.pdf'
         return filename
 
-    def _get_arxiv_title(self, arxiv_id: str) -> Optional[str]:
-        if not ARXIV_AVAILABLE:
-            return None
-        try:
-            search = arxiv.Search(id_list=[arxiv_id])
-            results = list(self.client.results(search))
-            if results:
-                return results[0].title.strip()
-            return None
-        except Exception as e:
-            logger.warning(f"Failed to get title from arXiv API: {e}")
-            return None
-
-    async def download_arxiv_pdf(
+    async def download_pdf(
         self,
-        arxiv_id: str,
-        title: Optional[str] = None,
+        pdf_url: str,
+        title: str,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> Optional[str]:
         """
-        Download a PDF file from arXiv for a given arXiv ID, then rename based on title.
+        Download a PDF file from the given URL, then rename based on title.
 
         Args:
-            arxiv_id: The arXiv ID (e.g., "2301.12345")
-            title: Optional title to use for filename
+            pdf_url: The URL of the PDF
+            title: Title to use for filename
             __event_emitter__: Optional event emitter for progress updates
 
         Returns:
@@ -107,13 +94,12 @@ class Tools:
                     {
                         "type": "status",
                         "data": {
-                            "description": f"Downloading PDF for arXiv ID: {arxiv_id}...",
+                            "description": f"Downloading PDF from: {pdf_url}...",
                             "done": False,
                         },
                     }
                 )
 
-            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
             headers = {
                 "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -132,31 +118,14 @@ class Tools:
             os.makedirs(self.download_dir, exist_ok=True)
 
             # Temporary filename
-            temp_filename = f"arxiv_{arxiv_id}.pdf"
+            temp_filename = f"ss_{hash(pdf_url)}.pdf"
             temp_path = os.path.join(self.download_dir, temp_filename)
 
             with open(temp_path, "wb") as f:
                 f.write(content)
 
-            # Get title
-            if title is None and ARXIV_AVAILABLE:
-                loop = asyncio.get_running_loop()
-                title = await loop.run_in_executor(None, self._get_arxiv_title, arxiv_id)
-
-            if PDF_READER_AVAILABLE and not title:
-                doc = fitz.open(temp_path)
-                metadata = doc.metadata
-                title = metadata.get('title', None)
-                if not title:
-                    # Fallback: extract from first page
-                    first_page = doc.load_page(0)
-                    text = first_page.get_text("text")
-                    title_lines = text.splitlines()[:5]  # Assume title in first few lines
-                    title = ' '.join(line.strip() for line in title_lines if line.strip()).strip()
-                doc.close()
-
             if not title or title == 'Unknown Title':
-                title = f"arxiv_{arxiv_id}"
+                title = f"ss_{hash(pdf_url)}"
 
             # Sanitize and create final filename
             safe_filename = self.sanitize_filename(title)
@@ -179,7 +148,7 @@ class Tools:
             return pdf_path
 
         except aiohttp.ClientError as e:
-            error_msg = f"Error downloading PDF from arXiv: {str(e)}"
+            error_msg = f"Error downloading PDF: {str(e)}"
             if __event_emitter__:
                 await __event_emitter__(
                     {
@@ -295,13 +264,13 @@ class Tools:
 
     async def extract_citations(self, pdf_text: str) -> List[str]:
         """
-        Extract potential arXiv citations from the references section.
+        Extract potential citations from the references section.
 
         Args:
             pdf_text: Full text of the PDF
 
         Returns:
-            List of potential arXiv IDs or titles from citations
+            List of potential DOIs, arXiv IDs, or titles from citations
         """
         # Find references section
         lower_text = pdf_text.lower()
@@ -313,15 +282,17 @@ class Tools:
 
         ref_text = pdf_text[ref_start:]
         
-        # Extract potential arXiv IDs
+        # Extract potential DOIs
+        dois = re.findall(r'doi:\s*([\w./-]+)', ref_text, re.IGNORECASE)
+        # arXiv IDs
         arxiv_ids = re.findall(r'arXiv:(\d{4}\.\d{4,5})(v\d+)?', ref_text)
         arxiv_ids = [id[0] for id in arxiv_ids]
         
-        # Extract titles (heuristic: lines that look like [num] Author. Title. Year.)
+        # Extract titles (heuristic)
         citations = re.findall(r'\[\d+\]\s+.*?\.', ref_text, re.DOTALL)
         titles = [cit.split('.')[1].strip() for cit in citations if '.' in cit]
 
-        return list(set(arxiv_ids + titles))
+        return list(set(dois + arxiv_ids + titles))
 
     async def search_relevant_citations(
         self,
@@ -335,7 +306,7 @@ class Tools:
         Recursively search for relevant cited papers based on original query.
 
         Args:
-            citations: List of citations (IDs or titles)
+            citations: List of citations (DOIs, IDs, titles)
             original_query: The original search topic
             max_depth: Maximum recursion depth
             current_depth: Current recursion depth
@@ -350,11 +321,9 @@ class Tools:
         results = {}
         for cit in citations:
             # Search for the citation as a topic
-            search_result = await self.search_arxiv_papers(cit, __event_emitter__)
+            search_result = await self.search_papers(cit, __event_emitter__)
             if "No papers found" not in search_result:
                 results[cit] = search_result
-                # Could download and analyze further recursively
-                # For now, just search; extend if needed
 
         return results
 
@@ -375,15 +344,7 @@ class Tools:
             __event_emitter__: Optional event emitter for progress updates
 
         Returns:
-            Dictionary containing analysis results including:
-            - extracted_text: Full text extracted from PDF
-            - page_count: Number of pages in the PDF
-            - word_count: Estimated word count
-            - analysis_summary: Brief analysis of the paper content
-            - image_paths: Paths to extracted images
-            - image_descriptions: Text descriptions of images
-            - citations: Extracted citations
-            - recursive_results: Results from recursive searches
+            Dictionary containing analysis results
         """
         if __event_emitter__:
             await __event_emitter__(
@@ -423,7 +384,6 @@ class Tools:
             char_count = len(extracted_text)
             line_count = len(extracted_text.splitlines())
 
-            # Simple content analysis (look for common sections)
             analysis_summary = {
                 "total_pages": page_count,
                 "estimated_words": word_count,
@@ -431,7 +391,6 @@ class Tools:
                 "line_count": line_count,
             }
 
-            # Check for common paper sections
             lower_text = extracted_text.lower()
             sections = {
                 "has_abstract": "abstract" in lower_text,
@@ -444,20 +403,18 @@ class Tools:
             }
 
             analysis_summary["sections"] = sections
-            analysis_summary["total_characters"] = char_count
             analysis_summary["avg_words_per_page"] = round(
                 word_count / max(1, page_count), 2
             )
 
             # Extract images
             image_paths = await self.extract_images_from_pdf(pdf_path)
-            # Describe images (placeholder)
             image_descriptions = [self.describe_image(path) for path in image_paths]
 
             # Extract citations
             citations = await self.extract_citations(extracted_text)
 
-            # Recursive search if original_query provided
+            # Recursive search
             recursive_results = {}
             if original_query and citations:
                 recursive_results = await self.search_relevant_citations(
@@ -516,11 +473,11 @@ class Tools:
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
-        Search for papers on a topic and download the specified number of PDFs.
+        Search for papers on a topic and download available open access PDFs.
 
         Args:
             topic: Topic to search for
-            num_papers: Number of papers to download (default: 1)
+            num_papers: Number of papers to attempt download (default: 1)
             analyze_images: Whether to extract and analyze images
             recursive_depth: Depth for recursive citation search
             __event_emitter__: Optional event emitter for progress updates
@@ -539,59 +496,56 @@ class Tools:
                 }
             )
 
-        # Perform search
-        search_results = await self.search_arxiv_papers(
+        search_results = await self.search_papers(
             topic, __event_emitter__=__event_emitter__
         )
 
         if "No papers found" in search_results:
             return {"error": "No papers found", "search_results": search_results}
 
-        # Download top papers
         downloaded_files = []
         papers_data = search_results.split("\n\n")
         papers_metadata = []
 
         for i, paper_info in enumerate(papers_data[:num_papers], 1):
-            if "URL:" in paper_info and "PDF URL:" in paper_info:
-                # Extract arXiv ID from URL (more reliable)
-                url_match = paper_info.split("URL:")[1].split("\n")[0].strip()
-                arxiv_id = url_match.split("/")[-1]
-                # Remove version if present
-                arxiv_id = re.sub(r'v\d+$', '', arxiv_id)
+            # Extract PDF URL if available
+            if "Open Access PDF:" in paper_info:
+                pdf_url_line = paper_info.split("Open Access PDF:")[1].split("\n")[0].strip()
+                if pdf_url_line != "None":
+                    # Extract title
+                    title_line = paper_info.splitlines()[0].strip()
+                    if ". " in title_line:
+                        title = title_line.split(". ", 1)[1]
+                    else:
+                        title = title_line
 
-                # Extract title from paper_info
-                title_line = paper_info.splitlines()[0].strip()  # e.g., "1. Title"
-                if ". " in title_line:
-                    title = title_line.split(". ", 1)[1]
-                else:
-                    title = title_line
-
-                # Download PDF
-                pdf_path = await self.download_arxiv_pdf(
-                    arxiv_id, title=title, __event_emitter__=__event_emitter__
-                )
-
-                if pdf_path:
-                    downloaded_files.append(pdf_path)
-                    analysis = await self.analyze_pdf_content(
-                        pdf_path, topic, recursive_depth, __event_emitter__
+                    # Download PDF
+                    pdf_path = await self.download_pdf(
+                        pdf_url_line, title, __event_emitter__=__event_emitter__
                     )
-                    papers_metadata.append(
-                        {
-                            "paper_info": paper_info,
-                            "pdf_path": pdf_path,
-                            "arxiv_id": arxiv_id,
-                            "analysis": analysis,
-                        }
-                    )
+
+                    if pdf_path:
+                        downloaded_files.append(pdf_path)
+                        analysis = await self.analyze_pdf_content(
+                            pdf_path, topic, recursive_depth, __event_emitter__
+                        )
+                        papers_metadata.append(
+                            {
+                                "paper_info": paper_info,
+                                "pdf_path": pdf_path,
+                                "analysis": analysis,
+                            }
+                        )
+            else:
+                # No open access PDF
+                pass
 
         if __event_emitter__:
             await __event_emitter__(
                 {
                     "type": "status",
                     "data": {
-                        "description": f"Successfully downloaded {len(downloaded_files)} papers",
+                        "description": f"Successfully downloaded {len(downloaded_files)} open access papers",
                         "done": True,
                     },
                 }
@@ -603,24 +557,24 @@ class Tools:
             "papers_metadata": papers_metadata,
         }
 
-    def _search_arxiv(self, search) -> List:
-        return list(self.client.results(search))
+    def _search_semantic_scholar(self, query: str) -> List[Dict]:
+        return self.client.search_paper(query, limit=self.max_results)['data']
 
-    async def search_arxiv_papers(
+    async def search_papers(
         self,
         topic: str,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> str:
         """
-        Search arXiv for papers on a given topic using the arxiv Python package and return formatted results.
+        Search Semantic Scholar for papers on a given topic and return formatted results.
         Args:
-            topic: Topic to search for (e.g., "quantum computing", "transformer models")
+            topic: Topic to search for (e.g., "transformer models")
         Returns:
             Formatted string containing paper details including titles, authors, dates,
             URLs and abstracts.
         """
-        if not ARXIV_AVAILABLE:
-            error_msg = "arxiv package is not available. Please install it: pip install arxiv"
+        if not SEMANTIC_SCHOLAR_AVAILABLE:
+            error_msg = "semanticscholar package is not available. Please install it: pip install semanticscholar"
             if __event_emitter__:
                 await __event_emitter__(
                     {"type": "status", "data": {"description": error_msg, "done": True}}
@@ -632,20 +586,14 @@ class Tools:
                 {
                     "type": "status",
                     "data": {
-                        "description": "Searching arXiv...",
+                        "description": "Searching Semantic Scholar...",
                         "done": False,
                     },
                 }
             )
         try:
-            search = arxiv.Search(
-                query=topic,
-                max_results=self.max_results,
-                sort_by=arxiv.SortCriterion.Relevance,
-                sort_order=arxiv.SortOrder.Descending
-            )
             loop = asyncio.get_running_loop()
-            entries = await loop.run_in_executor(None, self._search_arxiv, search)
+            entries = await loop.run_in_executor(None, self._search_semantic_scholar, topic)
 
             if not entries:
                 if __event_emitter__:
@@ -655,35 +603,31 @@ class Tools:
                             "data": {"description": "No papers found", "done": True},
                         }
                     )
-                return f"No papers found on arXiv related to '{topic}'"
+                return f"No papers found on Semantic Scholar related to '{topic}'"
 
             results = ""
-            # Loop over each paper entry.
             for i, entry in enumerate(entries, 1):
-                # Extract paper details with fallbacks
-                title_text = entry.title.strip() if entry.title else "Unknown Title"
-                authors_str = ", ".join(author.name for author in entry.authors) if entry.authors else "Unknown Authors"
-                summary_text = entry.summary.strip() if entry.summary else "No summary available"
-                link_text = entry.entry_id if entry.entry_id else "No link available"
-                pdf_link = entry.pdf_url if entry.pdf_url else "No link available"
-                pub_date = entry.published.strftime("%B-%Y") if isinstance(entry.published, datetime) else "Unknown Date"
+                title_text = entry.get('title', "Unknown Title").strip()
+                authors_str = ", ".join(a['name'] for a in entry.get('authors', [])) or "Unknown Authors"
+                summary_text = entry.get('abstract', "No summary available").strip()
+                link_text = entry.get('url', "No link available")
+                pdf_url = entry.get('openAccessPdf', {}).get('url', None) or "None"
+                year = entry.get('year', "Unknown Year")
 
-                # Format paper entry
                 results += f"{i}. {title_text}\n"
                 results += f"   Authors: {authors_str}\n"
-                results += f"   Published: {pub_date}\n"
+                results += f"   Published: {year}\n"
                 results += f"   URL: {link_text}\n"
-                results += f"   PDF URL: {pdf_link}\n"
+                results += f"   Open Access PDF: {pdf_url}\n"
                 results += f"   Summary: {summary_text}\n\n"
 
-                # Emit citation data as provided.
                 if __event_emitter__:
                     await __event_emitter__(
                         {
                             "type": "citation",
                             "data": {
                                 "document": [summary_text],
-                                "metadata": [{"source": pdf_link}],
+                                "metadata": [{"source": pdf_url if pdf_url != "None" else link_text}],
                                 "source": {"name": title_text},
                             },
                         }
@@ -712,10 +656,14 @@ class Tools:
 # ──────────────────────────────────────────────────────────────────────────────
 
 import unittest
+import asyncio
+import os
+import tempfile
+from pathlib import Path
 import shutil
 
-class TestArXivTool(unittest.IsolatedAsyncioTestCase):
-    """Basic smoke / integration tests for the arXiv tool functionality"""
+class TestSemanticScholarTool(unittest.IsolatedAsyncioTestCase):
+    """Basic smoke / integration tests for the Semantic Scholar tool functionality"""
 
     def setUp(self):
         self.tools = Tools()
@@ -730,12 +678,12 @@ class TestArXivTool(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_papers_basic(self):
         """Test that search_papers returns some formatted results"""
-        if not ARXIV_AVAILABLE:
-            self.skipTest("arxiv package not installed")
+        if not SEMANTIC_SCHOLAR_AVAILABLE:
+            self.skipTest("semanticscholar package not installed")
 
-        result = await self.tools.search_arxiv_papers(
-            topic="attention is all you need",
-            __event_emitter__=None  # no emitter in tests
+        result = await self.tools.search_papers(
+            topic="transformer neural networks",
+            __event_emitter__=None
         )
 
         self.assertIsInstance(result, str)
@@ -743,28 +691,31 @@ class TestArXivTool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Transformer", result, "Expected paper title fragment")
         self.assertIn("URL:", result, "Expected URL field in output")
 
-    @unittest.skipUnless(ARXIV_AVAILABLE and PDF_READER_AVAILABLE,
-                         "Requires both arxiv and PyMuPDF")
-    async def test_download_and_read_small_paper(self):
-        """Download a real small-ish paper and try to read its text"""
-        arxiv_id = "1706.03762"  # Attention Is All You Need (relatively short)
+    @unittest.skipUnless(SEMANTIC_SCHOLAR_AVAILABLE and PDF_READER_AVAILABLE,
+                         "Requires semanticscholar and PyMuPDF")
+    async def test_download_and_read_paper(self):
+        """Download an open access paper and try to read its text"""
+        # Use a known open access paper (e.g., Attention paper)
+        pdf_url = "https://arxiv.org/pdf/1706.03762.pdf"
+        title = "Attention Is All You Need"
 
-        pdf_path = await self.tools.download_arxiv_pdf(
-            arxiv_id=arxiv_id,
+        pdf_path = await self.tools.download_pdf(
+            pdf_url=pdf_url,
+            title=title,
             __event_emitter__=None
         )
 
         self.assertIsNotNone(pdf_path, "PDF should have been downloaded")
         self.assertTrue(os.path.isfile(pdf_path), "Downloaded file should exist")
 
-        # Check filename contains title words (rough check)
+        # Check filename
         filename = os.path.basename(pdf_path).lower()
-        self.assertTrue(any(word in filename for word in ["attention", "transformer"]))
+        self.assertTrue("attention" in filename)
 
         text = await self.tools.read_pdf(pdf_path)
         self.assertIsNotNone(text)
         self.assertGreater(len(text), 2000, "Should extract substantial text")
-        self.assertIn("Transformer", text, "Expected content in extracted text")
+        self.assertIn("Transformer", text, "Expected content")
 
         # Cleanup
         if os.path.exists(pdf_path):
@@ -782,56 +733,53 @@ class TestArXivTool(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("*", clean)
         self.assertTrue(clean.endswith(".pdf"))
 
-    @unittest.skipUnless(ARXIV_AVAILABLE and PDF_READER_AVAILABLE,
-                         "Requires arxiv + PyMuPDF")
+    @unittest.skipUnless(SEMANTIC_SCHOLAR_AVAILABLE and PDF_READER_AVAILABLE,
+                         "Requires semanticscholar + PyMuPDF")
     async def test_search_and_download_integration(self):
         """End-to-end test: search → download → basic analysis"""
         result = await self.tools.search_and_download_papers(
             topic="diffusion models",
             num_papers=1,
-            analyze_images=False,           # skip heavy image processing
-            recursive_depth=0,              # skip recursion
+            analyze_images=False,
+            recursive_depth=0,
             __event_emitter__=None
         )
 
         self.assertIsInstance(result, dict)
-        self.assertIn("downloaded_files", result)
-        self.assertGreater(len(result["downloaded_files"]), 0)
+        self.assertIn("search_results", result)
 
-        pdf_path = result["downloaded_files"][0]
-        self.assertTrue(os.path.isfile(pdf_path))
+        # May or may not download depending on open access, but check structure
+        if result.get("downloaded_files"):
+            pdf_path = result["downloaded_files"][0]
+            self.assertTrue(os.path.isfile(pdf_path))
 
-        # Minimal check that analysis ran
-        analysis = result["papers_metadata"][0]["analysis"]
-        self.assertIn("extracted_text", analysis)
-        self.assertGreater(len(analysis["extracted_text"]), 500)
+            analysis = result["papers_metadata"][0]["analysis"]
+            self.assertIn("extracted_text", analysis)
+            self.assertGreater(len(analysis["extracted_text"]), 500)
 
-        # Cleanup
-        for f in result["downloaded_files"]:
-            if os.path.exists(f):
-                try:
+            # Cleanup
+            for f in result["downloaded_files"]:
+                if os.path.exists(f):
                     os.remove(f)
-                except:
-                    pass
 
     async def test_extract_citations_smoke(self):
-        """Just check that citation extraction doesn't crash"""
+        """Check citation extraction doesn't crash"""
         fake_text = """
         References
-        [1] Goodfellow et al. Generative Adversarial Nets. 2014.
+        [1] Goodfellow et al. Generative Adversarial Nets. doi:10.48550/arXiv.1406.2661
         [2] arXiv:2010.09876 Ho et al. Denoising Diffusion Probabilistic Models.
-        [3] Kingma & Welling. Auto-Encoding Variational Bayes. arXiv:1312.6114
+        [3] Kingma & Welling. Auto-Encoding Variational Bayes. doi:10.48550/arXiv.1312.6114
         """
         citations = await self.tools.extract_citations(fake_text)
 
         self.assertIsInstance(citations, list)
         self.assertGreater(len(citations), 1)
-        self.assertTrue(any("2010.09876" in c for c in citations))
+        self.assertTrue(any("10.48550" in c for c in citations))
 
 
 if __name__ == "__main__":
-    print("Running arXiv Tool self-tests...")
-    print("Make sure 'arxiv' and 'pymupdf' are installed for full coverage.\n")
+    print("Running Semantic Scholar Tool self-tests...")
+    print("Make sure 'semanticscholar' and 'pymupdf' are installed for full coverage.\n")
 
     # Run asyncio-compatible unittest
     asyncio.run(unittest.main())
