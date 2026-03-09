@@ -22,6 +22,7 @@ import re
 import unicodedata
 import string
 from datetime import datetime
+import concurrent.futures
 
 try:
     import fitz  # PyMuPDF
@@ -70,9 +71,23 @@ class Tools:
             filename += '.pdf'
         return filename
 
+    def _get_arxiv_title(self, arxiv_id: str) -> Optional[str]:
+        if not ARXIV_AVAILABLE:
+            return None
+        try:
+            search = arxiv.Search(id_list=[arxiv_id])
+            results = list(self.client.results(search))
+            if results:
+                return results[0].title.strip()
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get title from arXiv API: {e}")
+            return None
+
     async def download_pdf(
         self,
         arxiv_id: str,
+        title: Optional[str] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> Optional[str]:
         """
@@ -80,6 +95,7 @@ class Tools:
 
         Args:
             arxiv_id: The arXiv ID (e.g., "2301.12345")
+            title: Optional title to use for filename
             __event_emitter__: Optional event emitter for progress updates
 
         Returns:
@@ -122,8 +138,12 @@ class Tools:
             with open(temp_path, "wb") as f:
                 f.write(content)
 
-            # Now read the PDF to get the title using PyMuPDF
-            if PDF_READER_AVAILABLE:
+            # Get title
+            if title is None and ARXIV_AVAILABLE:
+                loop = asyncio.get_running_loop()
+                title = await loop.run_in_executor(None, self._get_arxiv_title, arxiv_id)
+
+            if PDF_READER_AVAILABLE and not title:
                 doc = fitz.open(temp_path)
                 metadata = doc.metadata
                 title = metadata.get('title', None)
@@ -134,8 +154,6 @@ class Tools:
                     title_lines = text.splitlines()[:5]  # Assume title in first few lines
                     title = ' '.join(line.strip() for line in title_lines if line.strip()).strip()
                 doc.close()
-            else:
-                title = None
 
             if not title or title == 'Unknown Title':
                 title = f"arxiv_{arxiv_id}"
@@ -536,13 +554,22 @@ class Tools:
 
         for i, paper_info in enumerate(papers_data[:num_papers], 1):
             if "URL:" in paper_info and "PDF URL:" in paper_info:
-                # Extract arXiv ID from PDF URL
-                pdf_url_match = paper_info.split("PDF URL:")[1].strip()
-                arxiv_id = pdf_url_match.split("/")[-1].replace(".pdf", "")
+                # Extract arXiv ID from URL (more reliable)
+                url_match = paper_info.split("URL:")[1].split("\n")[0].strip()
+                arxiv_id = url_match.split("/")[-1]
+                # Remove version if present
+                arxiv_id = re.sub(r'v\d+$', '', arxiv_id)
+
+                # Extract title from paper_info
+                title_line = paper_info.splitlines()[0].strip()  # e.g., "1. Title"
+                if ". " in title_line:
+                    title = title_line.split(". ", 1)[1]
+                else:
+                    title = title_line
 
                 # Download PDF
                 pdf_path = await self.download_pdf(
-                    arxiv_id, __event_emitter__=__event_emitter__
+                    arxiv_id, title=title, __event_emitter__=__event_emitter__
                 )
 
                 if pdf_path:
@@ -575,6 +602,9 @@ class Tools:
             "downloaded_files": downloaded_files,
             "papers_metadata": papers_metadata,
         }
+
+    def _search_arxiv(self, search: arxiv.Search) -> List[arxiv.Result]:
+        return list(self.client.results(search))
 
     async def search_papers(
         self,
@@ -614,7 +644,8 @@ class Tools:
                 sort_by=arxiv.SortCriterion.Relevance,
                 sort_order=arxiv.SortOrder.Descending
             )
-            entries = list(self.client.results(search))
+            loop = asyncio.get_running_loop()
+            entries = await loop.run_in_executor(None, self._search_arxiv, search)
 
             if not entries:
                 if __event_emitter__:
@@ -676,6 +707,9 @@ class Tools:
                 )
             return error_msg
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  TESTS – run when file is executed directly
+# ──────────────────────────────────────────────────────────────────────────────
 
 import unittest
 import shutil
