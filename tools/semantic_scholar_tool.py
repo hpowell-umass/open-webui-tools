@@ -557,8 +557,19 @@ class Tools:
             "papers_metadata": papers_metadata,
         }
 
-    def _search_semantic_scholar(self, query: str) -> List[Dict]:
-        return self.client.search_paper(query, limit=self.max_results)['data']
+    async def _search_semantic_scholar_with_retry(self, query: str, max_retries=5):
+        for attempt in range(max_retries):
+            try:
+                return await self._rate_limited_request(
+                    loop.run_in_executor(None, lambda: self.client.search_paper(query, limit=self.max_results)['data'])
+                )
+            except Exception as e:
+                if "429" in str(e) or "Too Many Requests" in str(e):
+                    delay = (2 ** attempt) + random.uniform(0, 1)   # exponential backoff + jitter
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+        raise Exception("Max retries exceeded")
 
     async def search_papers(
         self,
@@ -593,7 +604,7 @@ class Tools:
             )
         try:
             loop = asyncio.get_running_loop()
-            entries = await loop.run_in_executor(None, self._search_semantic_scholar, topic)
+            entries = await loop.run_in_executor(None, self._search_semantic_scholar_with_retry, topic)
 
             if not entries:
                 if __event_emitter__:

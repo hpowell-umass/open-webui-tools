@@ -217,3 +217,246 @@ Example of how to reference images:
                     "data": {"description": error_msg, "done": True}
                 })
             return error_msg
+
+import pytest
+from unittest.mock import AsyncMock, Mock, patch
+import json
+
+# Assuming the Tools class is defined in the same file above
+# We'll test the Tools class as defined in the original code
+
+@pytest.mark.asyncio
+async def test_tools_initialization():
+    """Test that Tools initializes correctly"""
+    tools = Tools()
+    assert isinstance(tools.valves, Tools.Valves)
+    assert tools.wiki is None
+    assert tools.citation is False
+    assert tools.base_api_url == "https://en.wikipedia.org/w/api.php"
+    assert "IMPORTANT INSTRUCTION" in tools.image_prompt
+
+@pytest.mark.asyncio
+async def test_search_wiki_page_found():
+    """Test search_wiki when a Wikipedia page is found"""
+    tools = Tools()
+    
+    # Mock Wikipedia page
+    mock_page = Mock()
+    mock_page.exists.return_value = True
+    mock_page.title = "Test Article"
+    mock_page.summary = "<p>This is a test summary.</p>"
+    mock_page.fullurl = "https://en.wikipedia.org/wiki/Test_Article"
+    mock_page.sections = []
+    mock_page.links = {}
+    
+    # Mock Wikipedia instance
+    mock_wiki = Mock()
+    mock_wiki.page.return_value = mock_page
+    
+    # Mock event emitter
+    mock_event_emitter = AsyncMock()
+    
+    # Mock aiohttp session for image fetching
+    mock_session = AsyncMock()
+    mock_response = AsyncMock()
+    mock_response.json = AsyncMock(return_value={
+        "query": {
+            "pages": {
+                "123": {
+                    "title": "Test Article",
+                    "imageinfo": [{"url": "https://example.com/image.jpg"}]
+                }
+            }
+        }
+    })
+    mock_session.get.return_value.__aenter__.return_value = mock_response
+    mock_session.get.return_value.__aexit__.return_value = None
+    
+    with patch('wikipediaapi.Wikipedia') as mock_wiki_class, \
+         patch('aiohttp.ClientSession') as mock_session_class:
+        mock_wiki_class.return_value = mock_wiki
+        mock_session_class.return_value.__aenter__.return_value = mock_session
+        
+        result = await tools.search_wiki(
+            query="test",
+            max_results=3,
+            __event_emitter__=mock_event_emitter
+        )
+    
+    # Verify result contains expected elements
+    assert "# Test Article" in result
+    assert "This is a test summary." in result
+    assert "![Test Article](https://example.com/image.jpg)" in result
+    assert "## References & Links" in result
+    assert "- Wikipedia Article: [Test Article](https://en.wikipedia.org/wiki/Test_Article)" in result
+    
+    # Verify event emitter calls
+    assert mock_event_emitter.call_count >= 3  # status, citation, status
+    # Check first status call
+    mock_event_emitter.assert_any_call({
+        "type": "status",
+        "data": {
+            "description": "Searching Wikipedia for: test",
+            "done": False
+        }
+    })
+    # Check citation call
+    mock_event_emitter.assert_any_call({
+        "type": "citation",
+        "data": {
+            "document": [Mock()],  # We don't need to check exact content
+            "metadata": [{"source": "https://en.wikipedia.org/wiki/Test_Article"}],
+            "source": {"name": "Test Article"}
+        }
+    })
+    # Check final status call
+    mock_event_emitter.assert_any_call({
+        "type": "status",
+        "data": {
+            "description": "Found Wikipedia article: Test Article",
+            "done": True
+        }
+    })
+
+@pytest.mark.asyncio
+async def test_search_wiki_page_not_found():
+    """Test search_wiki when no Wikipedia page is found"""
+    tools = Tools()
+    
+    # Mock Wikipedia page that doesn't exist
+    mock_page = Mock()
+    mock_page.exists.return_value = False
+    
+    # Mock Wikipedia instance
+    mock_wiki = Mock()
+    mock_wiki.page.return_value = mock_page
+    
+    # Mock event emitter
+    mock_event_emitter = AsyncMock()
+    
+    with patch('wikipediaapi.Wikipedia') as mock_wiki_class:
+        mock_wiki_class.return_value = mock_wiki
+        
+        result = await tools.search_wiki(
+            query="nonexistentarticle12345",
+            __event_emitter__=mock_event_emitter
+        )
+    
+    assert result == "No Wikipedia article found for the given query."
+    
+    # Verify event emitter calls
+    assert mock_event_emitter.call_count == 2  # initial status and final status
+    mock_event_emitter.assert_any_call({
+        "type": "status",
+        "data": {
+            "description": "Searching Wikipedia for: nonexistentarticle12345",
+            "done": False
+        }
+    })
+    mock_event_emitter.assert_any_call({
+        "type": "status",
+        "data": {
+            "description": "No Wikipedia article found",
+            "done": True
+        }
+    })
+
+@pytest.mark.asyncio
+async def test_search_wiki_exception():
+    """Test search_wiki when an exception occurs"""
+    tools = Tools()
+    
+    # Mock event emitter
+    mock_event_emitter = AsyncMock()
+    
+    with patch('wikipediaapi.Wikipedia') as mock_wiki_class:
+        mock_wiki_class.side_effect = Exception("Test exception")
+        
+        result = await tools.search_wiki(
+            query="test",
+            __event_emitter__=mock_event_emitter
+        )
+    
+    assert result == "Error during Wikipedia search: Test exception"
+    
+    # Verify event emitter calls for error
+    assert mock_event_emitter.call_count == 2  # initial status and error status
+    mock_event_emitter.assert_any_call({
+        "type": "status",
+        "data": {
+            "description": "Searching Wikipedia for: test",
+            "done": False
+        }
+    })
+    mock_event_emitter.assert_any_call({
+        "type": "status",
+        "data": {
+            "description": "Error during Wikipedia search: Test exception",
+            "done": True
+        }
+    })
+
+@pytest.mark.asyncio
+async def test_search_wiki_with_sections_and_links():
+    """Test search_wiki with sections and related articles"""
+    tools = Tools()
+    
+    # Mock section
+    mock_section = Mock()
+    mock_section.title = "History"
+    mock_section.text = "<p>This is the history section.</p>"
+    
+    # Mock link page
+    mock_link_page = Mock()
+    mock_link_page.exists.return_value = True
+    mock_link_page.title = "Related Article"
+    mock_link_page.fullurl = "https://en.wikipedia.org/wiki/Related_Article"
+    
+    # Mock Wikipedia page
+    mock_page = Mock()
+    mock_page.exists.return_value = True
+    mock_page.title = "Test Article"
+    mock_page.summary = "<p>Test summary.</p>"
+    mock_page.fullurl = "https://en.wikipedia.org/wiki/Test_Article"
+    mock_page.sections = [mock_section]
+    mock_page.links = {
+        "Related Article": mock_link_page,
+        "Another Link": mock_link_page  # Duplicate for testing limit
+    }
+    
+    # Mock Wikipedia instance
+    mock_wiki = Mock()
+    mock_wiki.page.return_value = mock_page
+    
+    # Mock event emitter
+    mock_event_emitter = AsyncMock()
+    
+    # Mock aiohttp session (return no images for simplicity)
+    mock_session = AsyncMock()
+    mock_response = AsyncMock()
+    mock_response.json = AsyncMock(return_value={"query": {"pages": {}}})
+    mock_session.get.return_value.__aenter__.return_value = mock_response
+    mock_session.get.return_value.__aexit__.return_value = None
+    
+    with patch('wikipediaapi.Wikipedia') as mock_wiki_class, \
+         patch('aiohttp.ClientSession') as mock_session_class:
+        mock_wiki_class.return_value = mock_wiki
+        mock_session_class.return_value.__aenter__.return_value = mock_session
+        
+        result = await tools.search_wiki(
+            query="test",
+            max_results=1,  # Limit to 1 related article
+            __event_emitter__=mock_event_emitter
+        )
+    
+    # Verify sections are included
+    assert "## Article Contents" in result
+    assert "### History" in result
+    assert "This is the history section." in result
+    
+    # Verify related articles (limited to max_results=1)
+    assert "## Related Articles" in result
+    # Count occurrences of related article links - should be exactly 1
+    assert result.count("[Related Article]") == 1
+    # Verify another link is not included due to limit
+    assert result.count("[Another Link]") == 0
