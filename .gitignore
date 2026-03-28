@@ -128,3 +128,4 @@ logs/
 *.temp
 .tmp/
 .temp/
+test.*

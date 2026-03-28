@@ -65,12 +65,19 @@ class Tools:
         :return: Markdown content of the paper (abstract, sections, etc.).
         """
         cmd = ["hf", "papers", "read", paper_id]
+        markdown = ""
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode == 0:
-                return f"**Paper Content (ID: {paper_id})**\n\n{result.stdout}"
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break  # Exit loop if no more output
+                # print(f"Processing line: {str(line.rstrip())}")
+                markdown = markdown + str(line.rstrip()) + "\n"
+            if not proc.returncode and "Set HF_DEBUG=1 as environment variable for full traceback." not in markdown:
+                return f"**Paper Content (ID: {paper_id})**\n\n{markdown}"
             else:
-                return f"Error reading paper {paper_id}: {result.stderr}\n\nTip: Index it first at https://huggingface.co/papers/{paper_id}"
+                return f"Error reading paper {paper_id}: {proc.stderr}\n\nTip: Index it first at https://huggingface.co/papers/{paper_id}"
         except Exception as e:
             return f"Failed to read paper: {str(e)}"
 
