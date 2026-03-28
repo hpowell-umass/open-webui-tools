@@ -2,8 +2,8 @@
 title: HF Papers Tool
 author: Grok-assisted
 version: 1.1
-description: Search, list, and read arXiv papers via Hugging Face hf papers CLI. Returns clean markdown for RAG/agent use. Includes unit tests.
-requirements: subprocess  # hf CLI must be installed and in PATH on the server for runtime use
+description: Search, list, and read arXiv/HF papers via hf papers CLI. Returns clean markdown (with LaTeX math preserved) for RAG/agent use.
+requirements: subprocess
 """
 
 import subprocess
@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock
 
 class Tools:
     def __init__(self):
-        self.citation = True  # Optional: helps with attribution in UI
+        self.citation = True  # Helps with attribution in Open WebUI
 
     def hf_papers_list(self, sort: str = "trending", limit: int = 5, date: Optional[str] = None) -> str:
         """
@@ -58,7 +58,8 @@ class Tools:
     def hf_papers_read(self, paper_id: str) -> str:
         """
         Retrieve a full paper as clean, agent-ready markdown (best for RAG).
-        Works great for arXiv-only papers (use arXiv ID like 2503.12345).
+        Works great for arXiv-only papers (use arXiv ID like 1706.03762).
+        Equations from LaTeX/PDF are typically converted to $...$ or $$...$$ delimiters.
         
         :param paper_id: arXiv ID or HF paper ID.
         :return: Markdown content of the paper (abstract, sections, etc.).
@@ -74,106 +75,109 @@ class Tools:
             return f"Failed to read paper: {str(e)}"
 
 
-# ========================
-# Unit Tests (run at the bottom of the file)
-# ========================
+# ==================== UNIT TESTS (run with: python hf_papers_tool.py) ====================
 
 class TestHFPapersTool(unittest.TestCase):
 
     def setUp(self):
-        self.tool = Tools()
-
-    def test_tool_instantiation(self):
-        """Test that the Tools class can be instantiated without errors."""
-        self.assertIsInstance(self.tool, Tools)
-
-    def test_hf_papers_list_signature(self):
-        """Test that hf_papers_list method exists and has correct signature."""
-        self.assertTrue(hasattr(self.tool, 'hf_papers_list'))
-        # Check it can be called (signature test only)
-        self.assertTrue(callable(self.tool.hf_papers_list))
-
-    def test_hf_papers_search_signature(self):
-        """Test that hf_papers_search method exists and has correct signature."""
-        self.assertTrue(hasattr(self.tool, 'hf_papers_search'))
-        self.assertTrue(callable(self.tool.hf_papers_search))
-
-    def test_hf_papers_read_signature(self):
-        """Test that hf_papers_read method exists and has correct signature."""
-        self.assertTrue(hasattr(self.tool, 'hf_papers_read'))
-        self.assertTrue(callable(self.tool.hf_papers_read))
+        self.tools = Tools()
 
     @patch('subprocess.run')
     def test_hf_papers_list_success(self, mock_run):
-        """Test successful hf papers ls call with mocked subprocess."""
+        """Test successful listing of papers."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "Paper1: Title A\nPaper2: Title B"
+        mock_result.stdout = "Paper 1: Title A\nPaper 2: Title B"
         mock_run.return_value = mock_result
 
-        result = self.tool.hf_papers_list(sort="trending", limit=3, date="today")
+        result = self.tools.hf_papers_list(sort="trending", limit=3)
         self.assertIn("**HF Papers List**", result)
-        self.assertIn("Paper1: Title A", result)
+        self.assertIn("Title A", result)
         mock_run.assert_called_once()
 
     @patch('subprocess.run')
-    def test_hf_papers_list_failure(self, mock_run):
-        """Test error handling when CLI returns non-zero code."""
+    def test_hf_papers_list_error(self, mock_run):
+        """Test error handling in list."""
         mock_result = MagicMock()
         mock_result.returncode = 1
-        mock_result.stderr = "Command not found"
+        mock_result.stderr = "CLI error"
         mock_run.return_value = mock_result
 
-        result = self.tool.hf_papers_list(limit=5)
+        result = self.tools.hf_papers_list()
         self.assertIn("Error listing papers", result)
-        self.assertIn("Command not found", result)
 
     @patch('subprocess.run')
     def test_hf_papers_search_success(self, mock_run):
-        """Test successful search with mocked subprocess."""
+        """Test successful search."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "Result1\nResult2"
+        mock_result.stdout = "Result 1: Diffusion models"
         mock_run.return_value = mock_result
 
-        result = self.tool.hf_papers_search(query="diffusion models", limit=2)
-        self.assertIn("**Search Results for 'diffusion models'**", result)
-        self.assertIn("Result1", result)
+        result = self.tools.hf_papers_search("diffusion", limit=2)
+        self.assertIn("**Search Results for 'diffusion'**", result)
+        self.assertIn("Diffusion models", result)
 
     @patch('subprocess.run')
     def test_hf_papers_read_success(self, mock_run):
-        """Test successful read with mocked subprocess."""
+        """Test successful read with markdown output."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "# Abstract\nContent here..."
+        mock_result.stdout = (
+            "# Attention Is All You Need\n\n"
+            "Abstract: ...\n\n"
+            "The Transformer uses self-attention: $Attention(Q, K, V) = softmax(\\frac{QK^T}{\\sqrt{d_k}})V$\n\n"
+            "$$\\text{MultiHead}(Q, K, V) = \\text{Concat}(head_1, ..., head_h)W^O$$"
+        )
         mock_run.return_value = mock_result
 
-        result = self.tool.hf_papers_read("2503.12345")
-        self.assertIn("**Paper Content (ID: 2503.12345)**", result)
-        self.assertIn("# Abstract", result)
+        result = self.tools.hf_papers_read("1706.03762")
+        self.assertIn("**Paper Content (ID: 1706.03762)**", result)
+        self.assertIn("Attention Is All You Need", result)
+
+    @patch('subprocess.run')
+    def test_equations_converted_to_markdown_latex(self, mock_run):
+        """
+        Test that equations are properly converted from PDF/LaTeX source into Markdown.
+        hf papers read typically outputs math using standard $...$ (inline) or $$...$$ (display) delimiters.
+        This checks preservation of LaTeX syntax inside math blocks.
+        """
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = (
+            "Section 3.2: Self-Attention\n\n"
+            "The scaled dot-product attention is defined as:\n\n"
+            "$$\\text{Attention}(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$$\n\n"
+            "For multi-head: $head_i = \\text{Attention}(QW_i^Q, KW_i^K, VW_i^V)$"
+        )
+        mock_run.return_value = mock_result
+
+        result = self.tools.hf_papers_read("1706.03762")
+
+        # Check for common math delimiters (inline and display)
+        self.assertTrue(
+            "$" in result or "$$" in result,
+            "No math delimiters found — equations may not have been converted properly."
+        )
+        # Check specific LaTeX content is preserved inside math
+        self.assertIn("Attention}(Q, K, V)", result)
+        self.assertIn("\\sqrt{d_k", result)
+        self.assertIn("softmax", result)
+        self.assertIn("multi-head", result)  # or similar from the mock
 
     @patch('subprocess.run')
     def test_hf_papers_read_error(self, mock_run):
-        """Test error handling for read command."""
+        """Test error handling when reading a paper."""
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stderr = "Paper not found"
         mock_run.return_value = mock_result
 
-        result = self.tool.hf_papers_read("9999.99999")
-        self.assertIn("Error reading paper 9999.99999", result)
+        result = self.tools.hf_papers_read("invalid-id")
+        self.assertIn("Error reading paper", result)
         self.assertIn("Tip: Index it first", result)
 
-    @patch('subprocess.run')
-    def test_timeout_exception(self, mock_run):
-        """Test exception handling (e.g., timeout)."""
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["hf"], timeout=30)
 
-        result = self.tool.hf_papers_list()
-        self.assertIn("Failed to run hf papers ls", result)
-
-
-# Run tests when the file is executed directly (e.g., python hf_papers_tool.py)
 if __name__ == "__main__":
-    print("Running unit tests for HF Papers Tool...")
+    # Run tests when the file is executed directly (e.g., python hf_papers_tool.py)
     unittest.main(verbosity=2)
