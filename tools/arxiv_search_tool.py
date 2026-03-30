@@ -146,7 +146,7 @@ def get_paper_markdown(arxiv_id: str) -> str:
             # Find main .tex (contains \documentclass or old \documentstyle)
             main_content = None
             for fname, cont in file_dict.items():
-                if r"\\documentclass" in cont or r"\\documentstyle" in cont:
+                if "\\documentclass" in cont or "\\documentstyle" in cont:
                     main_content = cont
                     break
             if main_content is None:
