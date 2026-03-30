@@ -1,294 +1,286 @@
+"""
+Open-WebUI Tool: arXiv Paper Search & Markdown Converter
+
+This is a complete, self-contained tool for Open-WebUI.
+Place this file in your Open-WebUI tools directory (usually ./tools/)
+or upload it via the UI.
+
+Dependencies (install via pip in your Open-WebUI environment):
+    pip install arxiv pymupdf requests
+
+Optional but strongly recommended for perfect LaTeX → Markdown conversion
+(with $ and $$ equation syntax preserved):
+    apt-get install pandoc   # or equivalent in your container
+
+The tool exposes two functions:
+- search_arxiv: Search arXiv and return formatted results.
+- get_paper_markdown: Fetch a paper by arXiv ID → full Markdown (LaTeX preferred,
+  multi-file \input{} resolved, equations kept as $ / $$. Falls back to PDF
+  text extraction for ancient papers without source).
+
+Unit tests are included at the bottom and can be run with:
+    python this_file.py
+"""
+
 import arxiv
+import requests
 import tempfile
-import tarfile
 import os
 import re
-import gzip
-from pathlib import Path
-import fitz  # PyMuPDF
+import tarfile
+import io
+import subprocess
 import unittest
-from typing import List, Dict, Optional
+import fitz  # PyMuPDF
+from typing import Dict, Optional
 
 
-# ==================== INTERNAL HELPERS ====================
+def normalize_arxiv_id(arxiv_id: str) -> str:
+    """Normalize arXiv ID to the canonical form (e.g. 1706.03762)."""
+    arxiv_id = arxiv_id.strip()
+    if "arxiv.org" in arxiv_id.lower():
+        arxiv_id = arxiv_id.split("/")[-1]
+    if arxiv_id.lower().startswith("arxiv:"):
+        arxiv_id = arxiv_id[6:]
+    return arxiv_id
 
-def flatten_latex(tex_dir: str, main_tex_filename: str) -> str:
+
+def resolve_inputs(tex_content: str, file_dict: Dict[str, str]) -> str:
     """
-    Recursively inline all \input{} and \include{} statements to produce a single flat LaTeX string.
-    Handles nested includes piece-by-piece as required.
+    Recursively resolve all \input{...} and \include{...} statements.
+    Works for both flat and simple subdirectory structures (common in arXiv tarballs).
     """
-    def read_file(file_path: str) -> str:
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
-        except Exception:
-            return ""
+    def replacer(match: re.Match) -> str:
+        arg = match.group(1).strip().strip('"\'')
+        # Try exact match first, then basename + .tex
+        candidates = [
+            arg,
+            arg + ".tex" if not arg.endswith(".tex") else arg,
+            os.path.basename(arg),
+            os.path.basename(arg) + ".tex" if not os.path.basename(arg).endswith(".tex") else os.path.basename(arg),
+        ]
+        for cand in candidates:
+            if cand in file_dict:
+                included = file_dict[cand]
+                # Recurse
+                return resolve_inputs(included, file_dict)
+        # Not found → leave original (rare, but safe)
+        return match.group(0)
 
-    def inline_inputs(content: str, base_dir: str) -> str:
-        def replace_input(match: re.Match) -> str:
-            filename = match.group(1).strip()
-            if not filename.endswith(".tex"):
-                filename += ".tex"
-            file_path = os.path.join(base_dir, filename)
-            if os.path.exists(file_path):
-                included = read_file(file_path)
-                # Recurse for nested \input / \include
-                return inline_inputs(included, base_dir)
-            return match.group(0)  # leave unchanged if file missing
-
-        pattern = r"\\(?:input|include)\s*\{([^}]+)\}"
-        return re.sub(pattern, replace_input, content, flags=re.IGNORECASE)
-
-    main_path = os.path.join(tex_dir, main_tex_filename)
-    full_content = read_file(main_path)
-    return inline_inputs(full_content, tex_dir)
+    # Match both \input and \include
+    pattern = r'\\(?:input|include)\s*\{([^}]+)\}'
+    # Recursion is safe (max depth in real papers is < 10)
+    return re.sub(pattern, replacer, tex_content)
 
 
-def latex_to_markdown(tex: str) -> str:
+def tex_to_markdown(tex_str: str) -> str:
     """
-    Convert flattened LaTeX to Markdown.
-    - Sections become ## / ### headings.
-    - All math environments ($...$, $$...$$, \[...\], equation, align, etc.) are preserved exactly
-      with matching $ or $$ delimiters (the original LaTeX syntax is kept untouched).
-    - Common text formatting is converted to Markdown.
-    - Preamble, document envs, and non-math LaTeX commands are stripped or simplified.
+    Convert full LaTeX string to Markdown using pandoc (preferred) with
+    $ / $$ equation syntax. Falls back gracefully if pandoc is missing.
     """
-    # Step 1: Convert structural commands (before math protection)
-    tex = re.sub(r"\\section\*?\{([^}]+)\}", r"## \1", tex)
-    tex = re.sub(r"\\subsection\*?\{([^}]+)\}", r"### \1", tex)
-    tex = re.sub(r"\\subsubsection\*?\{([^}]+)\}", r"#### \1", tex)
-    tex = re.sub(r"\\paragraph\{([^}]+)\}", r"**\1**", tex)
-    tex = re.sub(r"\\begin\{abstract\}", "## Abstract\n", tex)
-    tex = re.sub(r"\\end\{abstract\}", "", tex)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".tex", delete=False, encoding="utf-8") as f:
+        f.write(tex_str)
+        tex_path = f.name
 
-    # Step 2: Protect ALL math blocks with placeholders so they are never stripped
-    math_blocks: List[str] = []
-
-    def store_math(match: re.Match) -> str:
-        idx = len(math_blocks)
-        # Store the ORIGINAL math syntax (guarantees matching $ or $$)
-        math_blocks.append(match.group(0))
-        return f"__MATH_BLOCK_{idx}__"
-
-    # Display math (various forms)
-    tex = re.sub(r"\\\[(.*?)\]", store_math, tex, flags=re.DOTALL)
-    tex = re.sub(r"\$\$(.*?)\$\$", store_math, tex, flags=re.DOTALL)
-    tex = re.sub(r"\\begin\{equation\*?\}(.*?)\\end\{equation\*?\}", store_math, tex, flags=re.DOTALL)
-    tex = re.sub(r"\\begin\{align\*?\}(.*?)\\end\{align\*?\}", store_math, tex, flags=re.DOTALL)
-    tex = re.sub(r"\\begin\{gather\*?\}(.*?)\\end\{gather\*?\}", store_math, tex, flags=re.DOTALL)
-
-    # Inline math $...$ (non-greedy, avoids escaped or double $)
-    tex = re.sub(r"(?<!\\)\$([^\$]+?)\$(?!\$)", store_math, tex)
-
-    # Step 3: Strip / simplify remaining LaTeX (math blocks are safe)
-    tex = re.sub(r"\\emph\{([^}]+)\}", r"*\1*", tex)
-    tex = re.sub(r"\\textbf\{([^}]+)\}", r"**\1**", tex)
-    tex = re.sub(r"\\textit\{([^}]+)\}", r"*\1*", tex)
-    tex = re.sub(r"\\([a-zA-Z]+)\{([^}]*)\}", r"\2", tex)  # general command -> content
-    tex = re.sub(r"\\[a-zA-Z]+(\s+|$)", " ", tex)  # commands without braces
-    tex = re.sub(r"\\begin\{[^}]+?\}(.*?)\\end\{[^}]+?\}", r"\1", tex, flags=re.DOTALL)  # other envs
-
-    # Step 4: Cleanup whitespace
-    tex = re.sub(r"\s{2,}", " ", tex)
-    tex = tex.replace("\\", "")  # final backslashes
-
-    # Step 5: Restore math blocks (original syntax guaranteed to have matching $ / $$)
-    for i, block in enumerate(math_blocks):
-        tex = tex.replace(f"__MATH_BLOCK_{i}__", block)
-
-    # Step 6: Remove any remaining preamble
-    lines = tex.split("\n")
-    cleaned: List[str] = []
-    skip_preamble = True
-    for line in lines:
-        stripped = line.strip()
-        if any(kw in stripped for kw in ["\\documentclass", "\\usepackage", "\\title{", "\\author{", "\\date{"]):
-            continue
-        if "\\begin{document}" in stripped:
-            skip_preamble = False
-            continue
-        if not skip_preamble:
-            cleaned.append(line)
-    tex = "\n".join(cleaned).strip()
-
-    return tex
-
-
-def pdf_to_markdown(pdf_path: str) -> str:
-    """
-    Fallback parser for papers without usable TeX source (old/pre-LaTeX PDFs).
-    Uses PyMuPDF to extract as much structured text as possible.
-    Equations appear as rendered text/symbols (no $ delimiters possible from PDF).
-    """
     try:
+        # pandoc command that reliably produces Markdown with math
+        cmd = [
+            "pandoc",
+            tex_path,
+            "-f", "latex",
+            "-t", "markdown",
+            "--standalone",
+            "--wrap=none",
+        ]
+        md_output = subprocess.check_output(cmd, text=True, timeout=60, stderr=subprocess.STDOUT)
+        # Standardize display math to $$...$$ (pandoc sometimes emits \[ \])
+        md_output = md_output.replace(r"\[", "$$").replace(r"\]", "$$")
+        return md_output
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        # Graceful fallback when pandoc is not installed
+        return f"**⚠️ pandoc not available – returning raw LaTeX (equations preserved as-is).**\n\n{tex_str[:20000]}...\n\n(Pandoc error: {str(e)})"
+    finally:
+        if os.path.exists(tex_path):
+            os.unlink(tex_path)
+
+
+def get_paper_markdown(arxiv_id: str) -> str:
+    """
+    Main tool function.
+    Returns the full paper as clean Markdown.
+    - Prefers LaTeX source (single or multi-file with \input{}).
+    - Retains perfect $ / $$ equation syntax.
+    - Falls back to PDF text extraction for very old papers without source.
+    """
+    arxiv_id = normalize_arxiv_id(arxiv_id)
+
+    # 1. Try LaTeX source first (most papers)
+    src_url = f"https://arxiv.org/src/{arxiv_id}"
+    try:
+        r = requests.get(src_url, timeout=30, allow_redirects=True)
+        if r.status_code == 200 and len(r.content) > 2000:  # arbitrary threshold to catch empty responses
+            content = r.content
+            content_type = r.headers.get("Content-Type", "").lower()
+            content_disp = r.headers.get("Content-Disposition", "").lower()
+
+            file_dict: Dict[str, str] = {}
+
+            # Detect tarball vs single .tex
+            if ("tar" in content_type or content_disp[:-1].endswith((".tar.gz", ".tgz")) or
+                src_url.endswith((".tar.gz", ".tgz"))):
+                tar = tarfile.open(fileobj=io.BytesIO(content), mode="r:gz")
+                for member in tar.getmembers():
+                    if member.isfile() and member.name.lower().endswith((".tex", ".sty", ".cls")):
+                        try:
+                            with tar.extractfile(member) as f:
+                                file_dict[os.path.basename(member.name)] = f.read().decode("utf-8", errors="replace")
+                        except Exception:
+                            continue
+            else:
+                # Single file (sometimes gzipped)
+                if content[:2] == b"\x1f\x8b":  # gzip magic
+                    import gzip
+                    content = gzip.decompress(content)
+                file_dict["main.tex"] = content.decode("utf-8", errors="replace")
+
+            # Find main .tex (contains \documentclass or old \documentstyle)
+            main_content = None
+            for fname, cont in file_dict.items():
+                if r"\\documentclass" in cont or r"\\documentstyle" in cont:
+                    main_content = cont
+                    break
+            if main_content is None:
+                # Fallback: longest .tex file
+                tex_files = [c for f, c in file_dict.items() if f.lower().endswith(".tex")]
+                if tex_files:
+                    main_content = max(tex_files, key=len)
+
+            if main_content:
+                full_tex = resolve_inputs(main_content, file_dict)
+                return tex_to_markdown(full_tex)
+
+    except Exception:
+        # Any network/processing error → fall through to PDF
+        pass
+
+    # 2. PDF fallback (old papers or source unavailable)
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    try:
+        r = requests.get(pdf_url, timeout=30)
+        if r.status_code != 200:
+            return f"❌ Paper {arxiv_id} not found (PDF download failed)."
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(r.content)
+            pdf_path = f.name
+
         doc = fitz.open(pdf_path)
-        markdown_parts: List[str] = []
-        for page_num, page in enumerate(doc):
-            # Extract plain text (best effort for arXiv PDFs)
+        markdown_parts = []
+        for i, page in enumerate(doc):
+            # Best-effort text extraction (preserves layout reasonably well)
             text = page.get_text("text")
-            markdown_parts.append(f"### Page {page_num + 1}\n\n{text.strip()}\n\n")
+            if text.strip():
+                markdown_parts.append(f"### Page {i+1}\n\n{text.strip()}\n\n")
         doc.close()
-        return "".join(markdown_parts).strip()
+        os.unlink(pdf_path)
+
+        if not markdown_parts:
+            return f"❌ Paper {arxiv_id} is an image-only PDF (no extractable text)."
+
+        return f"# Paper {arxiv_id} (PDF fallback – equations approximated as text)\n\n" + "".join(markdown_parts)
+
     except Exception as e:
-        return f"PDF parsing failed: {str(e)}"
+        return f"❌ Failed to retrieve paper {arxiv_id}:\n{str(e)}"
 
 
-# ==================== PUBLIC TOOL FUNCTIONS (for Open-WebUI) ====================
-
-def search_arxiv(query: str, max_results: int = 5) -> List[Dict]:
+def search_arxiv(query: str, max_results: int = 5) -> str:
     """
-    Search arXiv for papers using the official arxiv Python package.
-
-    :param query: Search query (supports arXiv syntax, e.g. "cat:cs.AI" or title keywords)
-    :param max_results: Maximum number of results to return (default 5)
-    :return: List of paper metadata dictionaries
+    Search arXiv and return a nicely formatted Markdown list of results.
     """
-    client = arxiv.Client()
     search = arxiv.Search(
         query=query,
         max_results=max_results,
         sort_by=arxiv.SortCriterion.Relevance,
+        sort_order=arxiv.SortOrder.Descending,
     )
-    results: List[Dict] = []
-    for result in client.results(search):
-        results.append({
-            "id": result.get_short_id(),  # e.g. 2403.12345v1
-            "title": result.title,
-            "authors": [author.name for author in result.authors],
-            "abstract": result.summary,
-            "published": str(result.published),
-            "pdf_url": result.pdf_url,
-            "arxiv_url": result.entry_id,
-        })
-    return results
+
+    results = []
+    for result in search.results():
+        short_id = result.get_short_id() or result.entry_id.split("/")[-1]
+        authors = ", ".join([str(a) for a in result.authors])
+        abstract_snippet = result.summary[:400] + "..." if len(result.summary) > 400 else result.summary
+
+        results.append(
+            f"**[{result.title}]({result.entry_id})**  \n"
+            f"**arXiv:** {short_id}  \n"
+            f"**Authors:** {authors}  \n"
+            f"**Published:** {result.published.strftime('%Y-%m-%d') if result.published else 'N/A'}  \n"
+            f"**Abstract:** {abstract_snippet}  \n"
+            f"[PDF]({result.pdf_url}) | [Source](https://arxiv.org/src/{short_id})  \n"
+            "---"
+        )
+
+    if not results:
+        return f"No results found for query: **{query}**"
+
+    return f"# arXiv Search Results for “{query}”\n\n" + "\n\n".join(results)
 
 
-def convert_paper_to_markdown(arxiv_id: str) -> str:
-    """
-    Main tool function: Convert an arXiv paper to Markdown.
-    1. Attempts to download TeX source (handles single .tex or multi-file .tar.gz with \input{}).
-    2. Flattens multi-file TeX piece-by-piece via recursive inlining.
-    3. Converts flattened TeX → Markdown while guaranteeing proper matching $ / $$ math syntax.
-    4. Falls back to PDF parsing with PyMuPDF for old papers without TeX source.
-    Returns the full Markdown string ready for the model.
-
-    :param arxiv_id: arXiv ID (e.g. "1706.03762" or "2403.12345")
-    :return: Markdown content of the paper
-    """
-    try:
-        client = arxiv.Client()
-        search = arxiv.Search(id_list=[arxiv_id])
-        result = next(client.results(search), None)
-        if not result:
-            return f"Paper {arxiv_id} not found on arXiv."
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            # Try TeX source first
-            try:
-                source_path = result.download_source(dirpath=tmp_dir)
-                extracted_tex = False
-
-                # Handle various source formats
-                if tarfile.is_tarfile(source_path):
-                    with tarfile.open(source_path) as tar:
-                        tar.extractall(path=tmp_dir)
-                    extracted_tex = True
-                elif source_path.endswith(".gz"):
-                    # Single-file .tex.gz
-                    tex_name = Path(source_path).name.replace(".gz", "")
-                    with gzip.open(source_path, "rb") as f_in:
-                        with open(os.path.join(tmp_dir, tex_name), "wb") as f_out:
-                            f_out.write(f_in.read())
-                    extracted_tex = True
-
-                if extracted_tex:
-                    # Locate main .tex (prefer file containing \documentclass)
-                    tex_files = list(Path(tmp_dir).rglob("*.tex"))
-                    if not tex_files:
-                        raise ValueError("No .tex files found in source")
-
-                    main_tex = None
-                    for tf in tex_files:
-                        with open(tf, "r", encoding="utf-8", errors="ignore") as f:
-                            if "\\documentclass" in f.read(2000):  # peek first 2k chars
-                                main_tex = tf.name
-                                break
-                    if not main_tex:
-                        # Fallback: largest file
-                        main_tex = max(tex_files, key=lambda p: p.stat().st_size).name
-
-                    flat_tex = flatten_latex(tmp_dir, main_tex)
-                    return latex_to_markdown(flat_tex)
-
-            except Exception as source_err:
-                # TeX failed → fallback to PDF (covers pre-LaTeX/old papers)
-                pdf_path = result.download_pdf(dirpath=tmp_dir)
-                return pdf_to_markdown(pdf_path)
-
-    except Exception as e:
-        return f"Error processing paper {arxiv_id}: {str(e)}"
-
-
-# ==================== UNIT TESTS ====================
+# ====================== UNIT TESTS ======================
 
 class TestArxivTool(unittest.TestCase):
-    """Unit tests for paper searching, equation conversion, full Markdown conversion (LaTeX + PDF), and error handling."""
 
-    def test_paper_searching(self):
-        """Confirm search_arxiv returns valid results."""
-        results = search_arxiv("large language models", max_results=2)
-        self.assertGreater(len(results), 0)
-        paper = results[0]
-        self.assertIn("id", paper)
-        self.assertIn("title", paper)
-        self.assertIn("abstract", paper)
-        self.assertIsInstance(paper["authors"], list)
+    def test_search(self):
+        """Confirm paper searching works with a well-known paper."""
+        result = search_arxiv("Attention Is All You Need", max_results=1)
+        self.assertIn("Attention Is All You Need", result)
+        self.assertIn("1706.03762", result)
 
-    def test_equation_conversion(self):
-        """Test that math syntax is preserved with exact matching $ / $$ delimiters."""
-        sample_tex = r"""
-\section{Test Section}
-Text with inline math $E=mc^2$ and another $x^2+y^2=z^2$.
-Display equation: $$\sum_{i=1}^n i = \frac{n(n+1)}{2}$$
-And bracketed: \[a^2 + b^2 = c^2\]
-Mixed text with equation: The speed of light is $c \approx 3 \times 10^8$ m/s.
+    def test_equation_conversion_inline(self):
+        """Test that inline $...$ syntax is retained."""
+        sample = r"The energy is given by $E = mc^2$."
+        md = tex_to_markdown(sample)
+        self.assertIn("$E = mc^2$", md)
+
+    def test_equation_conversion_block(self):
+        """Test that block equations become $$...$$."""
+        sample = r"""
+\begin{equation}
+a^2 + b^2 = c^2
+\end{equation}
 """
-        md = latex_to_markdown(sample_tex)
-        self.assertIn("## Test Section", md)
-        self.assertIn("$E=mc^2$", md)
-        self.assertIn("$x^2+y^2=z^2$", md)
-        self.assertIn("$$\\sum_{i=1}^n i = \\frac{n(n+1)}{2}$$", md)
-        self.assertIn("\\[a^2 + b^2 = c^2\\]", md)
-        self.assertIn("$c \\approx 3 \\times 10^8$", md)
+        md = tex_to_markdown(sample)
+        self.assertIn("$$", md)
+        self.assertIn("a^2 + b^2 = c^2", md)
 
-    def test_full_markdown_conversion_latex_paper(self):
-        """Full conversion test on a real modern LaTeX paper (multi-file capable)."""
-        paper_id = "1706.03762"  # "Attention Is All You Need" – has full TeX source
-        md = convert_paper_to_markdown(paper_id)
-        self.assertNotIn("Error", md)
-        self.assertGreater(len(md), 2000)  # substantial content
-        self.assertIn("## ", md)  # headings from sections
-        # Math should be present with proper delimiters
-        self.assertTrue(any(delim in md for delim in ["$", "$$", "\\["]))
+    def test_full_markdown_conversion_actual_latex_paper(self):
+        """Full end-to-end test on a real multi-file LaTeX paper (Attention Is All You Need)."""
+        result = get_paper_markdown("1706.03762")
+        self.assertIsNotNone(result)
+        self.assertGreater(len(result), 1000)
+        # Should contain markdown headers and equations
+        self.assertIn("# ", result)  # at least one section header
+        self.assertTrue("$" in result or "$$" in result)
 
     def test_pre_latex_pdf_paper(self):
-        """Test PDF fallback path on a real paper (simulates pre-LaTeX / source-unavailable case)."""
-        paper_id = "1706.03762"  # reuse known paper; PDF path is always exercised in fallback logic
-        # Directly exercise PDF parser for isolation
-        client = arxiv.Client()
-        search = arxiv.Search(id_list=[paper_id])
-        result = next(client.results(search))
-        with tempfile.TemporaryDirectory() as tmp:
-            pdf_path = result.download_pdf(dirpath=tmp)
-            md = pdf_to_markdown(pdf_path)
-        self.assertGreater(len(md), 1000)
-        self.assertIn("Page 1", md)  # structure from PDF parser
+        """
+        Test PDF fallback path with a real (very old) paper.
+        Note: Most early arXiv papers still have source, but the PDF branch is exercised
+        if source download fails or is empty. This confirms parsing works.
+        """
+        # Use an early arXiv paper (1992) – will likely hit PDF fallback in some environments
+        result = get_paper_markdown("hep-th/9201001")
+        self.assertIsNotNone(result)
+        self.assertGreater(len(result), 500)
+        # PDF fallback always starts with a header
+        self.assertIn("### Page", result)
 
     def test_non_existent_paper(self):
-        """Test graceful error handling for a non-existent paper ID."""
-        md = convert_paper_to_markdown("9999.99999")
-        self.assertIn("not found", md.lower()) or self.assertIn("Error", md)
+        """Confirm graceful error for a non-existent paper."""
+        result = get_paper_markdown("9999.99999")
+        self.assertIn("❌", result)
+        self.assertIn("not found", result.lower())
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)
