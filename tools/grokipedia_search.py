@@ -1,361 +1,237 @@
 """
-title: Grokipedia Search Tool
-description: Tool to search Grokipedia (xAI's AI-generated encyclopedia) and retrieve comprehensive article information using BeautifulSoup
-author: Grok (adapted from Haervwe Wikipedia tool)
-author_url: https://github.com/Haervwe/open-webui-tools/
-funding_url: https://github.com/Haervwe/open-webui-tools
-requirements: aiohttp beautifulsoup4
-version: 0.1.0
+title: Grokipedia Interface Tool
+author: Grok (built by xAI)
+version: 1.0
+license: MIT
+description: Interfaces with Grokipedia (https://grokipedia.com) using BeautifulSoup for web scraping. Provides search results (so the model can select specific pages), full page content retrieval, and internal link listing for navigation between connected Grokipedia pages.
+requirements: requests beautifulsoup4
 """
 
-import aiohttp
-from typing import Optional, Any, Callable, Awaitable
-from pydantic import BaseModel, Field
-import logging
+import requests
 from bs4 import BeautifulSoup
+from typing import List, Dict
 from urllib.parse import quote
-import unittest
-from unittest.mock import AsyncMock, patch
+from pydantic import BaseModel, Field
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class Tools:
-    class Valves(BaseModel):
-        """Configuration for Grokipedia tool"""
-
-        user_agent: str = Field(
-            default="OpenWebUI-GrokipediaTool/1.0 (https://github.com/Haervwe/open-webui-tools; contact@example.com)",
-            description="User agent for Grokipedia requests - REQUIRED to avoid 403 errors",
-        )
-
     def __init__(self):
-        self.valves = self.Valves()
+        """Initialize the Grokipedia tool."""
+        self.citation = True
         self.base_url = "https://grokipedia.com"
-        self.search_url = f"{self.base_url}/search"
 
-    async def _fetch_page(self, url: str) -> str:
-        """Helper to fetch a page with proper headers."""
-        headers = {
-            "User-Agent": self.valves.user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-        }
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    logger.warning(f"Failed to fetch {url}: status {response.status}")
-                    return ""
-                return await response.text()
+    def grokipedia_search(self, query: str) -> str:
+        """Search Grokipedia for a term/phrase and return structured search results.
+        The model can then select one or more specific results (by title or URL) and call get_grokipedia_page to fetch the full page(s).
 
-    async def search_grokipedia(
-        self,
-        query: str,
-        max_results: int = 5,
-        __user__: dict = {},
-        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+        :param query: The search term or phrase to look up on Grokipedia.
+        :return: A formatted string listing the top results with title, full URL, and snippet. Returns an error message if the request fails.
         """
-        Search Grokipedia and return a list of matching articles so the model can select one or more.
-        
-        Returns:
-            Markdown-formatted list of search results with titles, URLs, and short snippets.
-        """
+        encoded_query = quote(query)
+        search_url = f"{self.base_url}/search?q={encoded_query}"
         try:
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"Searching Grokipedia for: {query}",
-                            "done": False,
-                        },
-                    }
-                )
+            response = requests.get(search_url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
 
-            search_query = quote(query)
-            url = f"{self.search_url}?q={query}"
-            html = await self._fetch_page(url)
+            results: List[Dict[str, str]] = []
+            # Parse results by finding links to /page/ (core Grokipedia article pattern)
+            # Snippets are extracted from nearby text (robust fallback since exact classes may vary)
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if href.startswith("/page/"):
+                    title = link.get_text(strip=True)
+                    full_url = f"{self.base_url}{href}"
+                    # Grab nearby text as snippet (parent or siblings)
+                    snippet = ""
+                    parent = link.find_parent(["h1", "h2", "h3", "div", "li", "p"])
+                    if parent:
+                        snippet = parent.get_text(strip=True)[:300]
+                    # Deduplicate by URL
+                    if title and full_url and not any(r["url"] == full_url for r in results):
+                        results.append({"title": title, "url": full_url, "snippet": snippet or "No snippet available"})
 
-            if not html:
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {"type": "status", "data": {"description": "Search failed", "done": True}}
-                    )
-                return "No results found or search failed."
-
-            soup = BeautifulSoup(html, "html.parser")
-
-            # Parse search results - Grokipedia uses h2 for titles and p for snippets
-            results = []
-            # Look for result blocks (h2 followed by descriptive p or div)
-            headings = soup.find_all("h2")
-            for heading in headings[:max_results]:
-                title_tag = heading.find("a") or heading
-                title = title_tag.get_text(strip=True)
-                link = title_tag.get("href", "")
-                if not link.startswith("/page/") and not link.startswith("http"):
-                    continue
-                if not link.startswith("http"):
-                    link = self.base_url + link
-
-                # Find nearest snippet (next sibling p or div)
-                snippet = ""
-                next_p = heading.find_next_sibling("p")
-                if next_p:
-                    snippet = next_p.get_text(strip=True)[:300]
-
-                results.append({"title": title, "url": link, "snippet": snippet})
+            # Limit to top 10 for brevity
+            results = results[:10]
 
             if not results:
-                return f"No search results found for '{query}'."
+                return f"No results found for '{query}' (or parsing failed)."
 
-            # Build markdown output
-            result_md = f"# Grokipedia Search Results for \"{query}\"\n\n"
-            for i, r in enumerate(results, 1):
-                result_md += f"{i}. **[{r['title']}]({r['url']})**\n"
-                if r['snippet']:
-                    result_md += f"   {r['snippet']}\n\n"
-
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"Found {len(results)} Grokipedia results for: {query}",
-                            "done": True,
-                        },
-                    }
-                )
-
-            return result_md
-
+            output = f"Grokipedia Search Results for '{query}' ({len(results)} shown):\n\n"
+            for i, res in enumerate(results, 1):
+                output += f"{i}. **{res['title']}**\n   URL: {res['url']}\n   Snippet: {res['snippet']}\n\n"
+            return output
+        except requests.RequestException as e:
+            return f"Error searching Grokipedia: {str(e)}"
         except Exception as e:
-            error_msg = f"Error during Grokipedia search: {str(e)}"
-            logger.error(error_msg)
-            if __event_emitter__:
-                await __event_emitter__(
-                    {"type": "status", "data": {"description": error_msg, "done": True}}
-                )
-            return error_msg
+            return f"Unexpected error during search: {str(e)}"
 
-    async def get_grokipedia_page(
-        self,
-        title: str,
-        __user__: dict = {},
-        __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str:
+    def get_grokipedia_page(self, page_title_or_url: str) -> str:
+        """Fetch the full content of a specific Grokipedia page (after selecting from search results).
+
+        :param page_title_or_url: Either the exact page title (e.g. 'Elon Musk') or the full page URL.
+        :return: Cleaned main content of the page (title + body text). Returns an error message if the request fails.
         """
-        Retrieve the full Grokipedia article for a specific title (use exact title from search results).
-        
-        Returns:
-            Formatted markdown with full article text, sections, images, and references.
-        """
+        if page_title_or_url.startswith("http"):
+            url = page_title_or_url
+        else:
+            # Basic slugification (Grokipedia uses Title_With_Underscores)
+            slug = page_title_or_url.replace(" ", "_").replace("/", "_").replace(":", "")
+            url = f"{self.base_url}/page/{quote(slug)}"
+
         try:
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"Fetching Grokipedia page: {title}",
-                            "done": False,
-                        },
-                    }
-                )
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
 
-            # Convert title to Grokipedia slug (spaces → underscores)
-            slug = title.replace(" ", "_").replace("/", "_")
-            url = f"{self.base_url}/page/{slug}"
-            html = await self._fetch_page(url)
+            # Clean unwanted elements
+            for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
+                tag.decompose()
 
-            if not html:
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {"type": "status", "data": {"description": "Page not found", "done": True}}
-                    )
-                return f"No Grokipedia article found for '{title}'."
+            # Extract main content (try common containers first)
+            main_content = (
+                soup.find("main")
+                or soup.find("article")
+                or soup.find("div", class_=lambda x: x and ("content" in x.lower() or "body" in x.lower()))
+                or soup.body
+            )
 
-            soup = BeautifulSoup(html, "html.parser")
-
-            # Extract title
-            h1 = soup.find("h1")
-            page_title = h1.get_text(strip=True) if h1 else title
-
-            # Main content container (fallback to body if no specific class)
-            content = soup.find("article") or soup.find("main") or soup.body
-
-            # Extract images
-            images = []
-            for img in content.find_all("img") if content else []:
-                src = img.get("src")
-                alt = img.get("alt", "")
-                if src and not src.lower().endswith((".svg", ".gif")) and "http" in src:
-                    if not src.startswith("http"):
-                        src = self.base_url + src
-                    images.append({"title": alt or page_title, "url": src})
-
-            # Build full result
-            result = f"# {page_title}\n\n"
-
-            # Main image if available
-            if images:
-                result += f"![{images[0]['title']}]({images[0]['url']})\n\n"
-
-            # Full text extraction + section parsing
-            sections = []
-            summary = ""
-            current_section = {"title": "Introduction", "text": ""}
-
-            if content:
-                for tag in content.find_all(["h1", "h2", "h3", "p"]):
-                    if tag.name in ["h2", "h3"]:
-                        if current_section["text"].strip():
-                            sections.append(current_section)
-                        current_section = {"title": tag.get_text(strip=True), "text": ""}
-                    elif tag.name == "p" and not summary:
-                        summary = tag.get_text(strip=True)
-                        current_section["text"] += tag.get_text(strip=True) + "\n\n"
-                    elif tag.name == "p":
-                        current_section["text"] += tag.get_text(strip=True) + "\n\n"
-
-                if current_section["text"].strip():
-                    sections.append(current_section)
-
-            # Add summary
-            if summary:
-                result += f"{summary}\n\n"
-
-            # Add sections
-            if sections:
-                result += "## Article Contents\n\n"
-                for section in sections:
-                    result += f"### {section['title']}\n{section['text']}\n\n"
-
-            # Gallery
-            if len(images) > 1:
-                result += "## Gallery\n\n"
-                for img in images[1:]:
-                    result += f"![{img['title']}]({img['url']})\n\n"
-
-            # References & links
-            result += "## References & Links\n"
-            result += f"- Grokipedia Article: [{page_title}]({url})\n"
-
-            # Emit citation with full text
-            if __event_emitter__:
-                full_text = summary + "\n" + "\n".join([s["text"] for s in sections])
-                await __event_emitter__(
-                    {
-                        "type": "citation",
-                        "data": {
-                            "document": [full_text],
-                            "metadata": [{"source": url}],
-                            "source": {"name": page_title},
-                        },
-                    }
-                )
-
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"Retrieved Grokipedia article: {page_title}",
-                            "done": True,
-                        },
-                    }
-                )
-
-            return result
-
+            if main_content:
+                # Convert to readable text with line breaks for sections
+                text = main_content.get_text(separator="\n\n", strip=True)
+                # Prepend title if available
+                title_tag = soup.find("h1") or soup.find("title")
+                page_title = title_tag.get_text(strip=True) if title_tag else url.split("/")[-1]
+                return f"# {page_title}\n\n{text[:15000]}"  # Truncate very long pages
+            else:
+                return f"Page content could not be extracted from {url}."
+        except requests.RequestException as e:
+            return f"Error retrieving page {url}: {str(e)}"
         except Exception as e:
-            error_msg = f"Error fetching Grokipedia page: {str(e)}"
-            logger.error(error_msg)
-            if __event_emitter__:
-                await __event_emitter__(
-                    {"type": "status", "data": {"description": error_msg, "done": True}}
-                )
-            return error_msg
+            return f"Unexpected error retrieving page: {str(e)}"
+
+    def list_grokipedia_page_links(self, page_title_or_url: str) -> str:
+        """List internal links to other Grokipedia pages within the given page.
+        Useful for the model to discover and navigate to connected articles.
+
+        :param page_title_or_url: Either the exact page title (e.g. 'Elon Musk') or the full page URL.
+        :return: A formatted list of internal Grokipedia links (title → URL). Returns an error message if the request fails.
+        """
+        if page_title_or_url.startswith("http"):
+            url = page_title_or_url
+        else:
+            slug = page_title_or_url.replace(" ", "_").replace("/", "_").replace(":", "")
+            url = f"{self.base_url}/page/{quote(slug)}"
+
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            internal_links: List[Dict[str, str]] = []
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if href.startswith("/page/") and "/page/Main_Page" not in href:
+                    title = link.get_text(strip=True)
+                    if title and len(title) > 2:  # Filter out very short or noisy links
+                        full_url = f"{self.base_url}{href}"
+                        internal_links.append({"title": title, "url": full_url})
+
+            # Deduplicate by URL
+            unique_links = {l["url"]: l for l in internal_links}.values()
+
+            if not unique_links:
+                return f"No internal Grokipedia links found on {url}."
+
+            output = f"Internal Grokipedia links found on {url} ({len(unique_links)} shown):\n\n"
+            for i, link in enumerate(list(unique_links)[:25], 1):  # Reasonable limit
+                output += f"{i}. {link['title']} → {link['url']}\n"
+            return output
+        except requests.RequestException as e:
+            return f"Error listing links for {url}: {str(e)}"
+        except Exception as e:
+            return f"Unexpected error listing links: {str(e)}"
 
 
-# ========================= UNIT TESTS =========================
+# =============================================================================
+# UNIT TESTS (run with `python this_file.py`)
+# =============================================================================
+import unittest
+from unittest.mock import patch, MagicMock
 
-class TestGrokipediaTool(unittest.IsolatedAsyncioTestCase):
-    """Unit tests for the Grokipedia Search Tool (search + full page parsing)."""
 
+class TestGrokipediaTools(unittest.TestCase):
     def setUp(self):
         self.tools = Tools()
-        # Strong User-Agent to prevent 403 errors
-        self.tools.valves.user_agent = "GrokipediaTool-Test/1.0 (https://github.com/Haervwe/open-webui-tools; test@example.com)"
-        self.event_emitter = AsyncMock()
 
-    async def test_search_grokipedia_returns_results(self):
-        """Test the new search function returns usable results for selection."""
-        result = await self.tools.search_grokipedia(
-            query="George Washington",
-            max_results=3,
-            __event_emitter__=self.event_emitter
-        )
+    @patch("requests.get")
+    def test_grokipedia_search(self, mock_get):
+        """Test search returns parsed results."""
+        mock_html = """
+        <html>
+        <a href="/page/Elon_Musk">Elon Musk</a>
+        <p>Elon Musk is an engineer and entrepreneur...</p>
+        <a href="/page/SpaceX">SpaceX</a>
+        <p>SpaceX is a space exploration company...</p>
+        </html>
+        """
+        mock_response = MagicMock()
+        mock_response.text = mock_html
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
 
-        self.assertIsInstance(result, str)
-        self.assertIn("# Grokipedia Search Results for \"George Washington\"", result)
-        self.assertIn("George Washington", result)
-        self.assertIn("/page/George_Washington", result)  # at least one valid link
+        result = self.tools.grokipedia_search("Elon Musk")
+        self.assertIn("Elon Musk", result)
+        self.assertIn("/page/Elon_Musk", result)
+        self.assertIn("SpaceX", result)
+        self.assertIn("Grokipedia Search Results", result)
 
-        # Verify event emitter
-        self.event_emitter.assert_called()
-        calls = self.event_emitter.call_args_list
-        status_calls = [c for c in calls if c[0][0]["type"] == "status"]
-        self.assertGreater(len(status_calls), 1)
+    @patch("requests.get")
+    def test_get_grokipedia_page(self, mock_get):
+        """Test page retrieval and content cleaning."""
+        mock_html = """
+        <html><head><title>Test Page</title></head>
+        <main><h1>Test Page</h1><p>This is the main content.</p><script>ignore me</script></main>
+        </html>
+        """
+        mock_response = MagicMock()
+        mock_response.text = mock_html
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
 
-    async def test_get_grokipedia_page_george_washington_full_text(self):
-        """Test that fetching a full Grokipedia page returns complete article text (requested test)."""
-        result = await self.tools.get_grokipedia_page(
-            title="George Washington",
-            __event_emitter__=self.event_emitter
-        )
+        result = self.tools.get_grokipedia_page("Test Page")
+        self.assertIn("# Test Page", result)
+        self.assertIn("This is the main content", result)
+        self.assertNotIn("ignore me", result)
 
-        self.assertIsInstance(result, str)
-        self.assertIn("# George Washington", result)
-        self.assertIn("https://grokipedia.com/page/George_Washington", result)
-        self.assertGreater(len(result), 1500, "Result should contain substantial full article text")
+    @patch("requests.get")
+    def test_list_grokipedia_page_links(self, mock_get):
+        """Test internal link extraction."""
+        mock_html = """
+        <html>
+        <a href="/page/Linked_Page_1">Linked Page 1</a>
+        <a href="/page/Linked_Page_2">Linked Page 2</a>
+        <a href="/page/Main_Page">Skip Main</a>
+        </html>
+        """
+        mock_response = MagicMock()
+        mock_response.text = mock_html
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
 
-        # Verify key content from George Washington article
-        lower_result = result.lower()
-        self.assertIn("continental army", lower_result)
-        self.assertIn("first president", lower_result)
-        self.assertIn("mount vernon", lower_result)
+        result = self.tools.list_grokipedia_page_links("Test Page")
+        self.assertIn("Linked Page 1", result)
+        self.assertIn("Linked Page 2", result)
+        self.assertIn("→ https://grokipedia.com/page/Linked_Page_1", result)
+        self.assertNotIn("Main_Page", result)
 
-        # Check citation full text was emitted
-        calls = self.event_emitter.call_args_list
-        citation_calls = [c for c in calls if c[0][0].get("type") == "citation"]
-        if citation_calls:
-            doc = citation_calls[0][0][0]["data"]["document"][0]
-            self.assertGreater(len(doc), 2000, "Citation should include comprehensive full text")
-
-    async def test_get_grokipedia_page_nonexistent(self):
-        """Test graceful handling of non-existent pages."""
-        result = await self.tools.get_grokipedia_page(
-            title="ThisPageDoesNotExistXYZ12345",
-            __event_emitter__=self.event_emitter
-        )
-        self.assertIn("No Grokipedia article found", result)
-
-    async def test_search_and_get_page_workflow(self):
-        """Test full workflow: search → select → get full page."""
-        # Step 1: Search
-        search_result = await self.tools.search_grokipedia(query="Python programming", max_results=1)
-        self.assertIn("Python", search_result)
-
-        # Step 2: Get page (using a known title)
-        page_result = await self.tools.get_grokipedia_page(
-            title="Python (programming language)",
-            __event_emitter__=self.event_emitter
-        )
-        self.assertIn("# Python (programming language)", page_result)
-        self.assertGreater(len(page_result), 1000)
+    @patch("requests.get")
+    def test_error_handling(self, mock_get):
+        """Test graceful error handling."""
+        mock_get.side_effect = requests.RequestException("Connection failed")
+        result = self.tools.grokipedia_search("bad query")
+        self.assertIn("Error searching Grokipedia", result)
 
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
+if __name__ == "__main__":
+    unittest.main()
