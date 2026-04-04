@@ -64,6 +64,7 @@ from pydantic import BaseModel, Field
 from fastapi import Request, UploadFile
 from starlette.datastructures import Headers
 import io
+import contextlib
 
 from open_webui.utils.chat import (
     generate_chat_completion as generate_raw_chat_completion,
@@ -90,97 +91,6 @@ from open_webui.models.files import Files
 from open_webui.models.chats import Chats
 from open_webui.models.skills import Skills
 from open_webui.routers.files import upload_file_handler
-
-# --- ComfyUI Parallelism Patch (v14) ---
-# Monkeypatch ComfyUI router functions to use unique client IDs per call,
-# resolving WebSocket deadlocks when multiple subagents generate images for the same user.
-try:
-    import open_webui.routers.images as images_router
-
-    def _apply_comfy_patch():
-        for func_name in ["comfyui_create_image", "comfyui_edit_image"]:
-            orig_func = getattr(images_router, func_name, None)
-            if orig_func and not hasattr(orig_func, "_patched"):
-
-                async def patched_func(*args, **kwargs):
-                    # client_id is the 3rd positional argument (model, payload, client_id, ...)
-                    new_args = list(args)
-                    if len(new_args) >= 3:
-                        new_args[2] = f"{new_args[2]}_{uuid.uuid4().hex[:8]}"
-                    elif "client_id" in kwargs:
-                        kwargs["client_id"] = (
-                            f"{kwargs['client_id']}_{uuid.uuid4().hex[:8]}"
-                        )
-                    return await orig_func(*new_args, **kwargs)
-
-                patched_func._patched = True
-                setattr(images_router, func_name, patched_func)
-
-    _apply_comfy_patch()
-except Exception as e:
-    logging.error(f"Failed to apply ComfyUI parallelism patch: {e}")
-
-
-# --- MCP Parallelism & Resilience Patch (v15) ---
-# Monkeypatch MCPClient to use unique identifiers per connection,
-# similar to ComfyUI, avoiding session collisions and status leaks.
-try:
-    from open_webui.utils.mcp.client import MCPClient
-
-    _orig_mcp_connect = MCPClient.connect
-
-    async def _patched_mcp_connect(self, url: str, headers: Optional[dict] = None):
-        # 1. Provide a unique identity to the session via headers.
-        # This helps backend servers isolate concurrent requests from the same user/agent.
-        new_headers = dict(headers) if headers else {}
-        uid = uuid.uuid4().hex[:8]
-        new_headers.setdefault("X-MCP-Client-ID", f"planner_{uid}")
-
-        # Some SSE/HTTP implementations use User-Agent or custom headers for pinning.
-        orig_ua = new_headers.get("User-Agent", "OpenWebUI-MCP-Client")
-        new_headers["User-Agent"] = f"{orig_ua} (Planner-{uid})"
-
-        # 2. Call original connect with isolated headers
-        return await _orig_mcp_connect(self, url, new_headers)
-
-    if not hasattr(MCPClient, "_patched_mcp"):
-        MCPClient.connect = _patched_mcp_connect
-        MCPClient._patched_mcp = True
-except Exception as e:
-    logging.error(f"Failed to apply MCP parallelism patch: {e}")
-
-# v3.6: Suppress extremely noisy MCP validation warnings that can saturate the logs and block the receive loop.
-# The mcp library uses loguru, so standard logging.getLogger doesn't work.
-try:
-    from loguru import logger as loguru_logger
-    import sys
-
-    # Add a custom filter to handle 'Failed to validate notification' errors from the MCP SDK
-    # These are caused by non-standard notifications (like notifications/message) from some servers.
-    def _mcp_log_filter(record):
-        if (
-            "mcp.shared.session" in record.get("name", "")
-            and "Failed to validate notification" in record["message"]
-        ):
-            return False
-        return True
-
-    # Note: Accessing loguru's global state is invasive, but necessary for the 'Function' environment.
-    # OpenWebUI usually has its own loguru config; we attempt to add our filter if it exists.
-    if hasattr(loguru_logger, "remove") and hasattr(loguru_logger, "add"):
-        # v3.6.8: Use remove() + add() instead of configure() to avoid wiping existing OWUI handlers.
-        # We try to find any existing stderr handler to replace, or just add ours.
-        try:
-            loguru_logger.add(sys.stderr, filter=_mcp_log_filter, level="DEBUG")
-        except Exception:
-            # Fallback if add fails
-            if hasattr(loguru_logger, "configure"):
-                loguru_logger.configure(
-                    handlers=[{"sink": sys.stderr, "filter": _mcp_log_filter}]
-                )
-except Exception as e:
-    logging.debug(f"Failed to apply loguru filter: {e}")
-
 
 # --- Pydantic Models ---
 class ToolFunctionModel(BaseModel):
@@ -2235,6 +2145,80 @@ class MCPHub:
             self.mcp_clients.clear()
 
 
+class PlannerMCPClient:
+    """
+    Scoped wrapper around MCPClient that adds Planner-specific isolation headers.
+    Never modifies the MCPClient class itself — all changes are instance-local.
+    Transparent to all other OWUI operations.
+    """
+
+    def __init__(self):
+        self._client = MCPClient()
+        self._call_lock = asyncio.Lock()
+
+    async def connect(self, url: str, headers: Optional[dict] = None) -> None:
+        """
+        Connects with Planner-specific isolation headers injected.
+        Does not affect MCPClient class or any other instance.
+        """
+        isolated_headers = dict(headers) if headers else {}
+        uid = uuid.uuid4().hex[:8]
+
+        # Add isolation identity headers
+        isolated_headers.setdefault("X-MCP-Client-ID", f"planner_{uid}")
+        orig_ua = isolated_headers.get("User-Agent", "OpenWebUI-MCP-Client")
+        isolated_headers["User-Agent"] = f"{orig_ua} (Planner-{uid})"
+
+        await self._client.connect(url=url, headers=isolated_headers)
+
+    async def list_tool_specs(self) -> list[dict]:
+        async with self._call_lock:
+            return await self._client.list_tool_specs()
+
+    async def call_tool(
+        self, name: str, function_args: Optional[dict] = None
+    ) -> Any:
+        async with self._call_lock:
+            return await self._client.call_tool(name, function_args=function_args or {})
+
+    async def disconnect(self) -> None:
+        try:
+            async with asyncio.timeout(3.0):
+                await self._client.disconnect()
+        except Exception:
+            pass
+
+
+class ComfyUICallContext:
+    """
+    Context manager that temporarily provides a unique ComfyUI client_id
+    for the duration of a single tool call. Scoped to the calling coroutine.
+    No global state is modified.
+    """
+
+    def __init__(self, metadata: dict, base_client_id: str):
+        self._metadata = metadata
+        self._base_client_id = base_client_id
+        self._original_client_id = None
+        # We target the __metadata__ block where OWUI stores session info
+        self._pipe_meta = metadata.get("__metadata__", {})
+
+    async def __aenter__(self):
+        # Preserve original
+        self._original_client_id = self._pipe_meta.get("client_id")
+        # Inject unique scoped ID
+        unique_id = f"{self._base_client_id}_{uuid.uuid4().hex[:8]}"
+        self._pipe_meta["client_id"] = unique_id
+        return unique_id
+
+    async def __aexit__(self, *args):
+        # Restore original — no lasting state change
+        if self._original_client_id is None:
+            self._pipe_meta.pop("client_id", None)
+        else:
+            self._pipe_meta["client_id"] = self._original_client_id
+
+
 class StreamableHTTPMCPClient:
     """
     Per-server MCP client for Streamable HTTP transport.
@@ -2245,12 +2229,12 @@ class StreamableHTTPMCPClient:
         self.url = url
         self.headers = headers or {}
         self.timeout = timeout
-        self._client: Optional[MCPClient] = None
+        self._client: Optional[PlannerMCPClient] = None
         self._call_lock = asyncio.Lock()  # kept for ToolRegistry compatibility
 
     async def connect(self):
         async with asyncio.timeout(60.0):
-            self._client = MCPClient()
+            self._client = PlannerMCPClient()
             await self._client.connect(url=self.url, headers=self.headers)
 
     async def list_tool_specs(self) -> list[dict]:
@@ -2381,97 +2365,6 @@ class ToolRegistry:
             logger.error(f"Error resolving skills: {e}")
 
         return skill_ids, skill_prompt
-
-    def get_filtered_builtin_tools(
-        self,
-        valves: Any,
-        user_valves: Any,
-        model_info: dict[str, Any],
-        extra_params: dict[str, Any],
-    ) -> dict[str, Any]:
-        """
-        Resolves built-in tools for the planner, filtering out those handled by subagents.
-        Only adds tools if they were originally present in the planner model's features.
-        """
-        # Always proceed if skills are present, otherwise check for features
-        if not self.planner_features and not extra_params.get("__skill_ids__"):
-            return {}
-
-        active_features = {}
-        # Mapping of feature to subagent enable valve
-        feature_map = {
-            "web_search": "ENABLE_WEB_SEARCH_AGENT",
-            "image_generation": "ENABLE_IMAGE_GENERATION_AGENT",
-            "code_interpreter": "ENABLE_CODE_INTERPRETER_AGENT",
-            "knowledge": "ENABLE_KNOWLEDGE_AGENT",
-        }
-
-        for feature, valve_name in feature_map.items():
-            # If the feature was originally present in the planner model
-            if self.planner_features.get(feature):
-                # If the corresponding subagent is NOT enabled, the planner keeps the tool
-                if not getattr(valves, valve_name, True):
-                    active_features[feature] = True
-                # Special case for knowledge: rule says only to planner if not present in subagent
-                if feature == "knowledge" and not getattr(
-                    valves, "ENABLE_KNOWLEDGE_AGENT", True
-                ):
-                    active_features["knowledge"] = True
-
-        if not active_features and not extra_params.get("__skill_ids__"):
-            return {}
-
-        try:
-            # v3 parity: Explicitly control which built-in tool categories are enabled
-            # to prevent polluting the planner with redundant core tools (time, notes, etc.)
-            # handled by subagents.
-            # Base on live MODELS entry so capabilities/knowledge match Open WebUI core;
-            # view_skill is controlled only by extra_params["__skill_ids__"] (see OWUI get_builtin_tools).
-            if self.planner_info:
-                m_info = copy.deepcopy(self.planner_info)
-            else:
-                m_info = copy.deepcopy(model_info or {})
-            if "info" not in m_info:
-                m_info["info"] = {}
-            if "meta" not in m_info["info"]:
-                m_info["info"]["meta"] = {}
-            meta = m_info["info"]["meta"]
-            if self.model_knowledge:
-                mk = self.model_knowledge
-                meta["knowledge"] = (
-                    copy.deepcopy(mk) if isinstance(mk, list) else [copy.deepcopy(mk)]
-                )
-            elif isinstance(model_info, dict):
-                pipe_meta = model_info.get("info", {}).get("meta", {})
-                if pipe_meta.get("knowledge") is not None:
-                    meta.setdefault("knowledge", copy.deepcopy(pipe_meta["knowledge"]))
-
-            # Start by disabling everything, then enable only active features and skills
-            builtin_tools_config = {
-                "time": False,
-                "knowledge": active_features.get("knowledge", False),
-                "chats": False,
-                "memory": active_features.get(
-                    "memory", False
-                ),  # Usually handled by OWUI, but for parity
-                "web_search": active_features.get("web_search", False),
-                "image_generation": active_features.get("image_generation", False),
-                "code_interpreter": active_features.get("code_interpreter", False),
-                "notes": False,
-                "channels": False,
-            }
-
-            m_info["info"]["meta"]["builtinTools"] = builtin_tools_config
-
-            return get_builtin_tools(
-                self.request,
-                extra_params,
-                features=active_features,
-                model=m_info,
-            )
-        except Exception as e:
-            logger.error(f"Failed to load filtered built-in tools: {e}")
-            return {}
 
     def _get_planner_internal_tool_specs(
         self, subagents_list: list[str] = None
@@ -4450,8 +4343,20 @@ class SubagentManager:
 
             # Execute tool: configurable timeout (default 1200s)
             logger.debug(f"[Subagent: {model_id}] Calling tool {name}...")
-            async with asyncio.timeout(float(self.valves.SUBAGENT_TIMEOUT)):
-                res = await target_tool["callable"](**filtered_args)
+
+            # v3.15: Scoped ComfyUI isolation (Patch Fix)
+            is_comfy_call = name in ("generate_image", "edit_image") and target_tool
+            if is_comfy_call:
+                base_cid = self.metadata.get("__metadata__", {}).get(
+                    "client_id", self.context.chat_id or "planner"
+                )
+                ctx_manager = ComfyUICallContext(self.metadata, base_cid)
+            else:
+                ctx_manager = contextlib.nullcontext()
+
+            async with ctx_manager:
+                async with asyncio.timeout(float(self.valves.SUBAGENT_TIMEOUT)):
+                    res = await target_tool["callable"](**filtered_args)
 
             # v3.15: Robust tool result processing parity with main planner engine.
             # We use process_tool_result to handle file uploads, base64 conversion,
@@ -6029,7 +5934,18 @@ class PlannerEngine:
                     except Exception as e:
                         logger.warning(f"Signature inspection failed for main planner tool {name}: {e}")
 
-                    res = await tool_data["callable"](**filtered_args)
+                    # v3.15: Scoped ComfyUI isolation (Patch Fix)
+                    is_comfy_call = name in ("generate_image", "edit_image")
+                    if is_comfy_call:
+                        base_cid = self.metadata.get("__metadata__", {}).get(
+                            "client_id", self.context.chat_id or "planner"
+                        )
+                        ctx_manager = ComfyUICallContext(self.metadata, base_cid)
+                    else:
+                        ctx_manager = contextlib.nullcontext()
+
+                    async with ctx_manager:
+                        res = await tool_data["callable"](**filtered_args)
                     tc_return = process_tool_result(
                         self.context.request,
                         name,
