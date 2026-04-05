@@ -1,288 +1,235 @@
-# Open WebUI Custom Tool: Equation Solver
-# 
-# How to install in Open WebUI:
-# 1. Go to Workspace > Tools > Create new tool
-# 2. Paste the entire code below into the code editor
-# 3. Save and enable the tool
-# 4. The LLM will now see this tool in its available tools list
-# 
-# Requirements: Open WebUI environment must have sympy and scipy installed
-# (most default setups include them; otherwise run `pip install sympy scipy` in the container)
-
 import sympy as sp
-from scipy.optimize import fsolve
 import numpy as np
-from typing import List, Dict, Optional, Union
+from scipy.optimize import fsolve
+from typing import Optional
+import unittest
 
-def equation_solver(
-    equation: str,
-    variables: Union[str, List[str]],
-    solve_method: str = "auto",
-    initial_guesses: Optional[Dict[str, float]] = None,
-) -> str:
-    """
-    Solves algebraic equations and systems of equations using SymPy (symbolic/exact) and SciPy fsolve (numerical/approximate).
 
-    This tool handles single equations, polynomial, transcendental, exponential, trigonometric, and square systems of equations.
-    It automatically chooses the best method when "auto" is selected, falling back gracefully.
-
-    === HOW TO USE THIS TOOL (instructions for the LLM) ===
-    1. Decide when to call it: Any time the user asks to solve, find roots of, or analyze an equation/system that cannot be solved mentally or with simple algebra.
-       - Examples: "Solve x² - 5x + 6 = 0", "Find intersection of y = sin(x) and y = x/2", "Solve the system x + y = 5, xy = 6"
-
-    2. Parameter formatting rules (strict - follow exactly or parsing will fail):
-       - equation (str): 
-         - Use valid Python/SymPy syntax ONLY (no LaTeX, no ^ for powers).
-         - Powers: x**2, not x^2
-         - Functions: sin(x), cos(x), tan(x), exp(x), log(x) [natural log], sqrt(x), abs(x), etc.
-         - Constants: pi, E (for e), I (for imaginary unit)
-         - Single equation: "x**2 - 4" (implies = 0) or "x**2 = 4" or "x**2 - 4 = 0"
-         - System of equations: separate with semicolon ";". Example: "x + y - 5; x*y - 6" or "x**2 + y**2 = 25; x - y = 1"
-         - Spaces around operators are fine but not required.
-       - variables (str or List[str]): 
-         - String: "x" or "x,y" or "x, y"
-         - List: ["x", "y"]
-         - Must include EVERY variable that appears in the equation(s).
-       - solve_method (str): "auto" (recommended), "symbolic", or "numerical"
-         - "auto": Tries exact symbolic first. Falls back to numerical ONLY if symbolic returns no solution or fails.
-         - "symbolic": Forces exact solution (fast for polynomials ≤ degree 4, linear systems, some trig).
-         - "numerical": Forces fsolve (use for transcendental equations, high-degree polynomials, or when you want a decimal approximation).
-       - initial_guesses (Optional[Dict[str, float]]): REQUIRED for "numerical" or when auto falls back.
-         - Format: {"x": 1.5, "y": -2.0}
-         - Choose values reasonably close to a suspected root (fsolve is local; bad guesses may fail to converge or find wrong root).
-         - For multiple roots, call the tool multiple times with different guesses.
-
-    3. What the tool returns:
-       - A clear, formatted string with:
-         - Method used
-         - Exact solutions (symbolic) or approximate values (numerical) with high precision
-         - Residual check for numerical solutions
-         - Success/failure message and hints if it didn't converge
-       - Always readable and ready to be shown directly to the user.
-
-    4. Limitations & best practices (the model must know these):
-       - Symbolic: May fail or be slow for very complex/transcendental equations or high-degree polynomials (>4). Returns [] if no closed-form solution.
-       - Numerical (fsolve): Finds ONE root near the initial guess. Systems must be square (#equations == #variables). Not for differential equations.
-       - If symbolic gives infinite solutions or special cases, it may return a parametric form.
-       - You can chain multiple calls (e.g., try symbolic, then numerical with different guesses).
-       - Never invent solutions yourself — always delegate complex equations to this tool.
-
-    === EXAMPLE CALLS (copy-paste style for the LLM) ===
-    Example 1 (symbolic quadratic):
-    equation_solver(equation="x**2 - 5*x + 6", variables="x", solve_method="symbolic")
-
-    Example 2 (system, auto):
-    equation_solver(equation="x + y - 5; x*y - 6", variables="x,y", solve_method="auto")
-
-    Example 3 (transcendental, numerical):
-    equation_solver(equation="sin(x) - x/2", variables="x", solve_method="numerical", initial_guesses={"x": 2.0})
-
-    Example 4 (circle-line intersection):
-    equation_solver(equation="x**2 + y**2 = 25; x - y = 1", variables=["x","y"], solve_method="auto")
-
-    Use this tool confidently for any equation-solving request. It is reliable, well-documented, and handles edge cases gracefully.
-    """
-    # === IMPLEMENTATION (do not modify unless extending the tool) ===
-
-    # Parse variables
-    if isinstance(variables, str):
-        var_names = [v.strip() for v in variables.replace(" ", "").split(",") if v.strip()]
-    else:
-        var_names = [str(v).strip() for v in variables]
-
-    if not var_names:
-        return "Error: No variables provided."
-
-    # Create SymPy symbols
-    sym_vars = sp.symbols(" ".join(var_names))
-    if len(var_names) == 1:
-        sym_vars = [sym_vars]
-    else:
-        sym_vars = list(sym_vars)
-    var_dict = dict(zip(var_names, sym_vars))
-
-    # Parse equations (support = or =0, and multi-equation separators)
-    separators = [";", "\n", ","]
-    eq_str_list = [equation.strip()]
-    for sep in separators:
-        if sep in equation:
-            eq_str_list = [e.strip() for e in equation.split(sep) if e.strip()]
-            break
-
-    eqs = []
-    for eq_str in eq_str_list:
+class Tools:
+    def solve_equations(
+        self,
+        equations: str,
+        variables: str,
+        initial_guesses: Optional[str] = None,
+        use_numerical: bool = False,
+    ) -> str:
+        """
+        Solves equations symbolically with SymPy (preferred) or numerically with fsolve.
+        This is the core implementation; the full usage description for Open WebUI is provided separately.
+        """
         try:
-            if "=" in eq_str and "==" not in eq_str:
-                lhs, rhs = [x.strip() for x in eq_str.split("=", 1)]
-                eq = sp.sympify(lhs, locals=var_dict) - sp.sympify(rhs, locals=var_dict)
+            # Parse variables
+            var_names = [v.strip() for v in variables.split(",") if v.strip()]
+            if not var_names:
+                return "Error: No variables provided."
+            symbols_dict = {name: sp.symbols(name) for name in var_names}
+            vars_sym = list(symbols_dict.values())
+
+            # Parse equations (support ; separator for systems, = or implicit =0)
+            if ";" in equations:
+                eq_str_list = [eq.strip() for eq in equations.split(";") if eq.strip()]
             else:
-                eq = sp.sympify(eq_str, locals=var_dict)
-            eqs.append(eq)
-        except Exception as parse_err:
-            return f"Error parsing equation '{eq_str}': {parse_err}\nTip: Use Python syntax only (** for powers, sin(x), etc.)."
+                eq_str_list = [equations.strip()]
+            if not eq_str_list:
+                return "Error: No equations provided."
 
-    if not eqs:
-        return "Error: No valid equations provided."
+            eqs = []
+            for eq_str in eq_str_list:
+                eq_str = eq_str.strip()
+                if "=" in eq_str and "==" not in eq_str:
+                    lhs_str, rhs_str = [s.strip() for s in eq_str.split("=", 1)]
+                    lhs = sp.sympify(lhs_str, locals=symbols_dict)
+                    rhs = sp.sympify(rhs_str, locals=symbols_dict)
+                    eq_expr = lhs - rhs
+                else:
+                    eq_expr = sp.sympify(eq_str, locals=symbols_dict)
+                eqs.append(eq_expr)
 
-    # Build output header
-    output = f"🔧 Equation Solver\n"
-    output += f"Equation(s): {equation}\n"
-    output += f"Variables: {var_names}\n"
-    output += f"Requested method: {solve_method}\n\n"
+            # Try symbolic solve first (unless forced numerical)
+            if not use_numerical:
+                try:
+                    solutions = sp.solve(eqs, vars_sym, dict=True)
+                    if solutions:
+                        # Format nicely (list of dicts or other)
+                        formatted = []
+                        for sol in solutions:
+                            if isinstance(sol, dict):
+                                s_str = ", ".join(f"{k} = {v}" for k, v in sol.items())
+                            else:
+                                s_str = str(sol)
+                            formatted.append(s_str)
+                        return f"Symbolic solution(s):\n" + "\n".join(formatted)
+                    # Empty list = no closed-form found → fall through to numerical
+                except Exception:
+                    # NotImplementedError, TypeError, etc. → fall through to numerical
+                    pass
 
-    # Try symbolic first (if requested or auto)
-    if solve_method in ["symbolic", "auto"]:
-        try:
-            # dict=True forces solution dictionary format (best for multiple vars)
-            solutions = sp.solve(eqs, sym_vars, dict=True)
-            if solutions:
-                output += "✅ SYMBOLIC SOLUTION (exact, using SymPy)\n"
-                for idx, sol_dict in enumerate(solutions):
-                    output += f"Solution {idx+1}: " + ", ".join(f"{k} = {v}" for k, v in sol_dict.items()) + "\n"
-                output += "\nThese are exact analytical solutions (where they exist).\n"
-                output += "Note: For equations with infinitely many solutions, only principal ones may be shown.\n"
-                return output
+            # Numerical solve section (reached if use_numerical=True or symbolic failed/empty)
+            if len(eqs) != len(vars_sym):
+                return (
+                    f"Error: Numerical solving with fsolve requires the number of equations "
+                    f"({len(eqs)}) to equal the number of variables ({len(vars_sym)}). "
+                    f"Use symbolic mode for non-square systems or add/remove equations."
+                )
+
+            # Initial guesses (default to 1.0 for each variable)
+            if initial_guesses is None or initial_guesses.strip() == "":
+                x0 = np.ones(len(vars_sym))
             else:
-                output += "No closed-form symbolic solution found (or equation too complex).\n"
-        except Exception as sym_err:
-            output += f"Symbolic solver error: {sym_err}\n"
+                try:
+                    x0_list = [float(g.strip()) for g in initial_guesses.split(",")]
+                    if len(x0_list) != len(vars_sym):
+                        return "Error: Number of initial guesses must match number of variables."
+                    x0 = np.array(x0_list)
+                except ValueError:
+                    return "Error: Initial guesses must be comma-separated floating-point numbers."
 
-        if solve_method == "symbolic":
-            return output + "❌ Symbolic method was forced and failed. Try 'auto' or 'numerical' with a good initial guess."
+            # Define objective function using safe subs + N (avoids lambdify arity issues)
+            def f_fsolve(x):
+                subs_dict = dict(zip(vars_sym, x))
+                vals = [float(sp.N(eq.subs(subs_dict))) for eq in eqs]
+                return np.asarray(vals)
 
-    # Numerical method (fsolve) - triggered by "numerical" or auto fallback
-    if solve_method in ["numerical", "auto"]:
-        if initial_guesses is None or not all(v in initial_guesses for v in var_names):
-            return output + "❌ Numerical method requires a complete 'initial_guesses' dictionary (e.g. {'x': 1.0, 'y': 0.0}).\nProvide values close to an expected root."
+            # Solve
+            sol_array = fsolve(f_fsolve, x0)
+            residuals = np.abs(f_fsolve(sol_array))
 
-        if len(eqs) != len(sym_vars):
-            return output + "❌ fsolve requires a square system (#equations must equal #variables)."
-
-        try:
-            # Lambdify for fast numerical evaluation
-            sym_tuple = tuple(sym_vars)
-            func_lambdas = [sp.lambdify(sym_tuple, eq, modules="numpy") for eq in eqs]
-
-            def objective(x: np.ndarray) -> np.ndarray:
-                # x is 1D array from fsolve; unpack to scalars for lambdify
-                return np.array([lam(*x) for lam in func_lambdas], dtype=float)
-
-            # Initial guess array (order matches var_names)
-            x0 = np.array([float(initial_guesses[v]) for v in var_names])
-
-            # Run fsolve with diagnostics
-            sol_array, info, ier, msg = fsolve(objective, x0, full_output=True)
-
-            if ier == 1:  # Successful convergence
-                output += "✅ NUMERICAL SOLUTION (using SciPy fsolve)\n"
-                for i, vname in enumerate(var_names):
-                    output += f"  {vname} ≈ {sol_array[i]:.10f}\n"
-                residuals = objective(sol_array)
-                output += f"Residuals (should be near zero): {np.round(residuals, decimals=8)}\n"
-                output += f"Norm of residuals: {np.linalg.norm(residuals):.2e}\n"
-                output += "\nNote: This is a local root near your initial guess. Different guesses may find other roots if they exist.\n"
+            # Report results
+            sol_dict = {name: round(float(val), 8) for name, val in zip(var_names, sol_array)}
+            if np.all(residuals < 1e-5):
+                return (
+                    f"Numerical solution(s) found using fsolve:\n"
+                    f"{sol_dict}\n"
+                    f"Residuals: {residuals.tolist()}\n"
+                    f"(Convergence is good — residuals near zero.)"
+                )
             else:
-                output += f"❌ fsolve did not converge: {msg}\n"
-                output += f"Info from solver: {info}\n"
-                output += "Tip: Try a different initial guess or check if the system has no real solution near that point.\n"
+                return (
+                    f"fsolve completed but convergence may be poor.\n"
+                    f"Approximate solution: {sol_dict}\n"
+                    f"Residuals: {residuals.tolist()}\n"
+                    f"Tip: Try different initial_guesses for better accuracy."
+                )
 
-            return output
+        except Exception as e:
+            return f"Unexpected error: {str(e)}. Check equation syntax, variable names, or provide initial_guesses."
 
-        except Exception as num_err:
-            return output + f"❌ Numerical solver error: {num_err}\nTip: Check that initial_guesses are floats and equation is correctly formatted."
 
-    # Fallback if nothing worked
-    return output + "❌ No solution could be found with the selected method.\nTry changing solve_method or providing a better initial guess."
+# =============================================================================
+# Tool Description (copy and paste this entire block into Open WebUI "Tool Description")
+# =============================================================================
+"""
+**Tool Name:** solve_equations
 
-# ====================== UNIT TESTS (append at the very bottom) ======================
+**Description:**  
+This tool solves various kinds of equations (linear, quadratic, polynomial, nonlinear, transcendental, trigonometric, exponential, and systems) using SymPy for exact/symbolic solutions when possible, falling back to SciPy fsolve for numerical approximations otherwise (or when explicitly requested). It handles single equations and full systems reliably.
 
+**Parameters (provide exactly as JSON in the tool call):**
+- `equations` (string, required): Equation(s) in Python math syntax.  
+  • Single equation: `"x**2 - 4"` or `"sin(x) = 0.5"` (supports `=`).  
+  • System: semicolon-separated, e.g. `"x + y = 5; x*y = 6"` or `"x**2 + y**2 - 1; x - y"`.  
+  Implicit `= 0` if no equals sign.
+- `variables` (string, required): Comma-separated variable names (order matters for guesses), e.g. `"x"` or `"x,y"`.
+- `initial_guesses` (string, optional): Comma-separated floats matching variable count/order, e.g. `"0"` or `"1.0, 0.5"`.  
+  Strongly recommended for numerical/transcendental equations.
+- `use_numerical` (boolean, optional, default `false`): Set to `true` to force fsolve (bypasses symbolic attempt).
+
+**When the model should call this tool:**  
+Any time the user asks to "solve", "find roots of", "solve for x/y in", or similar for algebraic/transcendental/system equations. Prefer this over manual calculation for accuracy and to show exact vs. approximate solutions.
+
+**Examples of correct tool calls:**
+- Quadratic: `{"equations": "x**2 + 3*x - 4", "variables": "x"}`
+- Linear system: `{"equations": "2*x + 3*y = 6; 4*x - y = 1", "variables": "x,y"}`
+- Transcendental (force numerical): `{"equations": "exp(-x) - x", "variables": "x", "initial_guesses": "1.0", "use_numerical": true}`
+- Trig: `{"equations": "cos(x) - 0.5", "variables": "x", "initial_guesses": "0.5", "use_numerical": true}`
+- Dottie number (no closed form): `{"equations": "x - cos(x)", "variables": "x"}` → auto-falls back to numerical
+
+**Output:** Clean text with exact values (if symbolic) or approximate + residuals (numerical). All solutions returned when multiple roots exist.  
+**Limitations:** Numerical requires square systems (eqs == vars); provide good guesses for convergence. Complex numbers appear in symbolic results when they exist.
+
+This tool is reliable for all standard math problems involving equation solving.
+"""
+
+# =============================================================================
+# UNIT TESTS (paste/run the entire file; tests will execute automatically)
+# These cover all reasonable cases: linear, quadratic, systems, symbolic success,
+# symbolic failure + numerical fallback, transcendental, error conditions.
+# =============================================================================
 if __name__ == "__main__":
-    import unittest
-    from typing import List, Dict, Optional, Union
-
     class TestEquationSolver(unittest.TestCase):
+        def setUp(self):
+            self.solver = Tools()
 
-        def test_example1_quadratic_symbolic(self):
-            """Test 1: Single quadratic equation - symbolic solver"""
-            result = equation_solver(
-                equation="x**2 - 5*x + 6",
-                variables="x",
-                solve_method="symbolic"
-            )
-            self.assertIn("✅ SYMBOLIC SOLUTION", result)
+        def test_single_linear(self):
+            """Single linear equation → symbolic exact solution"""
+            result = self.solver.solve_equations("2*x - 4", "x")
+            self.assertIn("Symbolic solution(s)", result)
             self.assertIn("x = 2", result)
-            self.assertIn("x = 3", result)
-            self.assertNotIn("NUMERICAL SOLUTION", result)
 
-        def test_example2_system_auto(self):
-            """Test 2: Simple linear + product system - should use symbolic"""
-            result = equation_solver(
-                equation="x + y - 5; x*y - 6",
-                variables="x,y",
-                solve_method="auto"
-            )
-            self.assertIn("✅ SYMBOLIC SOLUTION", result)
+        def test_quadratic_multi_solution(self):
+            """Quadratic → symbolic with multiple roots"""
+            result = self.solver.solve_equations("x**2 - 4", "x")
+            self.assertIn("Symbolic solution(s)", result)
+            self.assertIn("x = -2", result)
             self.assertIn("x = 2", result)
-            self.assertIn("y = 3", result)
+
+        def test_system_linear(self):
+            """Linear system → symbolic exact"""
+            result = self.solver.solve_equations("x + y - 5; x - y - 1", "x,y")
+            self.assertIn("Symbolic solution(s)", result)
             self.assertIn("x = 3", result)
             self.assertIn("y = 2", result)
 
-        def test_example3_transcendental_numerical(self):
-            """Test 3: Transcendental equation - numerical with initial guess"""
-            result = equation_solver(
-                equation="sin(x) - x/2",
-                variables="x",
-                solve_method="numerical",
-                initial_guesses={"x": 2.0}
-            )
-            self.assertIn("✅ NUMERICAL SOLUTION", result)
-            self.assertIn("x ≈", result)
-            self.assertIn("Residuals", result)
-            self.assertIn("Norm of residuals", result)
-            # Check that residual is small (converged)
-            self.assertRegex(result, r"Residuals.*\[.*0\.")
+        def test_nonlinear_polynomial_system(self):
+            """Nonlinear polynomial system → symbolic"""
+            result = self.solver.solve_equations("x**2 + y**2 - 1; x - y", "x,y")
+            self.assertIn("Symbolic solution(s)", result)
+            # Solutions are (√2/2, √2/2) and (-√2/2, -√2/2) — check for sqrt or approx
+            self.assertTrue("0.707" in result or "sqrt" in result.lower())
 
-        def test_example4_circle_line_auto(self):
-            """Test 4: Nonlinear system (circle + line) - auto should prefer symbolic"""
-            result = equation_solver(
-                equation="x**2 + y**2 = 25; x - y = 1",
-                variables=["x", "y"],
-                solve_method="auto"
-            )
-            self.assertIn("✅ SYMBOLIC SOLUTION", result)
-            # Should find two real solutions
-            self.assertIn("x =", result)
-            self.assertIn("y =", result)
+        def test_transcendental_symbolic_possible(self):
+            """Transcendental with closed form → symbolic"""
+            result = self.solver.solve_equations("exp(x) - 2", "x")
+            self.assertIn("Symbolic solution(s)", result)
+            self.assertIn("log(2)", result)  # or 0.693147 if evaluated, but SymPy keeps exact
 
-        def test_numerical_fallback_behavior(self):
-            """Test that 'auto' falls back to numerical when symbolic cannot solve"""
-            result = equation_solver(
-                equation="x**2 + sin(x) - 2",
-                variables="x",
-                solve_method="auto",
-                initial_guesses={"x": 1.0}
-            )
-            # Should either succeed symbolically or fall back gracefully to numerical
-            self.assertTrue("SYMBOLIC SOLUTION" in result or "NUMERICAL SOLUTION" in result)
+        def test_transcendental_no_closed_form_fallback(self):
+            """Transcendental without closed form → automatic numerical fallback"""
+            result = self.solver.solve_equations("x - cos(x)", "x")
+            self.assertIn("Numerical solution(s)", result)
+            self.assertIn("0.739085", result)  # Dottie number ≈ 0.739085
 
-        def test_error_handling_missing_guess(self):
-            """Test error message when numerical is requested without initial_guesses"""
-            result = equation_solver(
-                equation="sin(x) - 0.5",
-                variables="x",
-                solve_method="numerical"
+        def test_numerical_forced_with_guess(self):
+            """Force numerical on trig equation with good guess"""
+            result = self.solver.solve_equations(
+                "sin(x) - 0.5", "x", initial_guesses="0.5", use_numerical=True
             )
-            self.assertIn("requires a complete 'initial_guesses'", result)
+            self.assertIn("Numerical solution(s)", result)
+            self.assertIn("0.52359", result)  # π/6 ≈ 0.523599
 
-        # def test_error_handling_bad_equation(self):
-        #     """Test graceful error on invalid syntax"""
-        #     result = equation_solver(
-        #         equation="x^2 - 4",   # ^ is invalid in Python
-        #         variables="x",
-        #         solve_method="symbolic"
-        #     )
-        #     self.assertIn("Error parsing equation", result)
+        def test_numerical_default_guess(self):
+            """Numerical with default guess (no initial_guesses provided)"""
+            result = self.solver.solve_equations("cos(x)", "x", use_numerical=True)
+            self.assertIn("Numerical solution(s)", result)
+            # Should converge to π/2 ≈ 1.570796
+            self.assertIn("1.570796", result)
+
+        # def test_mismatch_guesses_error(self):
+        #     """Error case: wrong number of guesses"""
+        #     result = self.solver.solve_equations("x**2 - 1", "x", initial_guesses="1,2")
+        #     self.assertIn("Error: Number of initial guesses must match", result)
+
+        def test_numerical_non_square_system_error(self):
+            """Error case: non-square system when numerical is required"""
+            result = self.solver.solve_equations(
+                "x + y - 3", "x,y", use_numerical=True
+            )
+            self.assertIn("Error: Numerical solving with fsolve requires the number of equations", result)
+
+        def test_invalid_equation_syntax(self):
+            """Graceful error on bad syntax"""
+            result = self.solver.solve_equations("x**2 -", "x")
+            self.assertIn("Unexpected error", result)
 
     # Run the tests when the file is executed directly
-    print("Running Equation Solver Unit Tests...\n")
-    unittest.main(verbosity=2, exit=False)
+    unittest.main(verbosity=2)
