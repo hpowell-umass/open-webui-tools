@@ -37,6 +37,7 @@ Known Issues:
 - Parallel subagents managing files on the same environment (Code intepreter / terminal agents) concurrently may inherently cause issues.
 - Parallel subagents in local environments that require loading and unloading another external models (Local LLMs + Comfyui)risk OOM errors.
 """
+
 import ast
 import asyncio
 import hashlib
@@ -61,11 +62,13 @@ from typing import (
     List,
 )
 from pydantic import BaseModel, Field
+from contextvars import ContextVar
+
 from fastapi import Request, UploadFile
 from starlette.datastructures import Headers
 import io
 import contextlib
-
+from contextlib import asynccontextmanager
 from open_webui.utils.chat import (
     generate_chat_completion as generate_raw_chat_completion,
 )
@@ -91,8 +94,70 @@ from open_webui.models.files import Files
 from open_webui.models.chats import Chats
 from open_webui.models.skills import Skills
 from open_webui.routers.files import upload_file_handler
+from open_webui.utils.images.comfyui import get_images, comfyui_upload_image
+
+
+# --- Globals & Context ---
+logger = logging.getLogger(__name__)
+
+# v3.15: Surgical discovery patch for ComfyUI.
+# Intercepts the client_id and replaces it with a context-local ID if the caller is the planner.
+_is_planner_execution_ctx: ContextVar[Optional[bool]] = ContextVar(
+    "is_planner_execution_ctx", default=None
+)
+
+
+def _apply_comfy_patch():
+    """
+    Surgical, non-invasive discovery patch for ComfyUI.
+    Intercepts the client_id and adds a unique suffix to prevent WebSocket listener hijacking.
+    """
+    try:
+        import open_webui.routers.images as images_router
+
+        for func_name in ["comfyui_create_image", "comfyui_edit_image"]:
+            orig_func = getattr(images_router, func_name, None)
+            if orig_func and not hasattr(orig_func, "_patched"):
+
+                async def patched_func(*args, **kwargs):
+                    # client_id is the 3rd positional argument (model, payload, client_id, ...)
+                    # Suffix only if we are in a planner execution context.
+                    if _is_planner_execution_ctx.get():
+                        new_args = list(args)
+                        if len(new_args) >= 3:
+                            new_args[2] = f"{new_args[2]}_{uuid.uuid4().hex[:8]}"
+                        elif "client_id" in kwargs:
+                            kwargs["client_id"] = (
+                                f"{kwargs['client_id']}_{uuid.uuid4().hex[:8]}"
+                            )
+                        return await orig_func(*new_args, **kwargs)
+                    return await orig_func(*args, **kwargs)
+
+                patched_func._patched = True
+                setattr(images_router, func_name, patched_func)
+        logger.info("[Planner] ComfyUI isolation patch applied successfully.")
+    except Exception as e:
+        logger.debug(f"ComfyUI patch skipped/failed: {e}")
+
+
+@asynccontextmanager
+async def _temporary_history_injection(history: list, messages: list):
+    """
+    Context manager to safely inject and cleanup messages into a history list.
+    Ensures that temporary items (like judge feedback) are removed even if execution fails.
+    """
+    injected_ids = [m.get("id") for m in messages if m.get("id")]
+    history.extend(messages)
+    try:
+        yield
+    finally:
+        # Identity-based cleanup to preserve original history integrity
+        history[:] = [m for m in history if m.get("id") not in injected_ids]
+
 
 # --- Pydantic Models ---
+
+
 class ToolFunctionModel(BaseModel):
     name: str
     arguments: str
@@ -112,6 +177,28 @@ class TaskStateModel(BaseModel):
 # For subagent_history, keep as dict for now (complex key)
 
 ToolCallDict = Dict[str, ToolCallEntryModel]
+
+
+@asynccontextmanager
+async def _temporary_history_injection(history: list, message: dict):
+    """
+    Appends a message to history for the duration of the block,
+    then removes it unconditionally on exit — even on exception or cancellation.
+
+    Use for ephemeral context messages (judge summaries, system injections)
+    that should not persist into subsequent planner turns.
+    """
+    history.append(message)
+    try:
+        yield
+    finally:
+        # Remove the last occurrence of our injected message.
+        # We search from the end to handle the case where something
+        # else was appended after us (defensive, shouldn't happen in practice).
+        for i in range(len(history) - 1, -1, -1):
+            if history[i] is message:  # Identity check, not equality
+                history.pop(i)
+                break
 
 
 # --- New Agent Models ---
@@ -228,8 +315,16 @@ class QueueEmitter:
 
 
 class UIState(BaseModel):
+    """Internal state for UI synchronization."""
+
     model_config = {"arbitrary_types_allowed": True}
-    total_emitted: str
+
+    plan_html: str = ""
+    total_emitted: str = ""
+    status: str = ""
+    is_active: bool = False
+    # v3.15: Monotonic counter to ensure UI emissions are authoritative and ordered
+    version: int = 0
     lock: asyncio.Lock = Field(default_factory=asyncio.Lock)
 
 
@@ -418,7 +513,9 @@ async def planner_merge_mcp_tools_from_ids(
                 if isinstance(metadata, dict):
                     mid = metadata.get("message_id") or metadata.get("__message_id__")
                 if not mid and isinstance(extra_params, dict):
-                    mid = extra_params.get("message_id") or extra_params.get("__message_id__")
+                    mid = extra_params.get("message_id") or extra_params.get(
+                        "__message_id__"
+                    )
 
                 if mid:
                     headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = mid
@@ -1166,7 +1263,9 @@ class Utils:
 
         curl_headers = ""
         if token:
-            curl_headers = f'-H "Authorization: Bearer {token}" --cookie "token={token}"'
+            curl_headers = (
+                f'-H "Authorization: Bearer {token}" --cookie "token={token}"'
+            )
 
         return {
             "{OPEN_WEBUI_TOKEN}": token,
@@ -1306,7 +1405,9 @@ class PlannerState:
         key = json.dumps([chat_id, sub_task_id, model_id], ensure_ascii=False)
         self._subagent_history[key] = messages
 
-    def get_metadata(self, chat_id: str, sub_task_id: str, model_id: str) -> dict[str, Any]:
+    def get_metadata(
+        self, chat_id: str, sub_task_id: str, model_id: str
+    ) -> dict[str, Any]:
         # v3.15: Use JSON array as a robust composite key (escapes colons in model/task IDs)
         key = json.dumps([chat_id, sub_task_id, model_id], ensure_ascii=False)
         return self._subagent_metadata.get(key, {})
@@ -1335,6 +1436,7 @@ class UIRenderer:
             # If no queue is provided, QueueEmitter would orphaned. We wrap the original emitter instead.
             self.emitter = event_emitter
         self.call = event_call
+        self.state = UIState()
 
     @staticmethod
     def _base_theme_js() -> str:
@@ -1604,7 +1706,15 @@ class UIRenderer:
     }})()"""
 
     async def emit_status(self, message: str, done: bool = False) -> None:
-        event = {"type": "status", "data": {"description": message, "done": done}}
+        async with self.state.lock:
+            # v3.15: Incremented version to ensure monotonicity
+            self.state.version += 1
+            version = self.state.version
+
+        event = {
+            "type": "status",
+            "data": {"description": message, "done": done, "version": version},
+        }
         # v3.6.12 Handle terminal events synchronously to avoid pending drops if the worker cancels instantly
         if done and hasattr(self, "_real_emitter") and self._real_emitter:
             await self._real_emitter(event)
@@ -1619,7 +1729,13 @@ class UIRenderer:
             await self.emitter(event)
 
     async def emit_replace(self, content: str) -> None:
-        await self.emitter({"type": "replace", "data": {"content": content}})
+        async with self.state.lock:
+            self.state.version += 1
+            version = self.state.version
+
+        await self.emitter(
+            {"type": "replace", "data": {"content": content, "version": version}}
+        )
 
     def build_tool_call_details(
         self,
@@ -1820,6 +1936,7 @@ class UIRenderer:
         )
         return html
 
+
 class StatePersistence:
     """Handles loading and saving planner state across turns via JSON files attached to the chat."""
 
@@ -1836,7 +1953,9 @@ class StatePersistence:
         self.request = context.request
         self.user = context.user
 
-    async def recover_from_files(self, body: dict, chat_id: str, current_files: list = None) -> None:
+    async def recover_from_files(
+        self, body: dict, chat_id: str, current_files: list = None
+    ) -> None:
         """Exact same logic as the old _recover_state_from_files, but now in its own class."""
         state_file = None
 
@@ -1960,7 +2079,9 @@ class StatePersistence:
                                 )
 
                             if isinstance(parts, (list, tuple)) and len(parts) == 3:
-                                norm_key = json.dumps([chat_id, parts[1], parts[2]], ensure_ascii=False)
+                                norm_key = json.dumps(
+                                    [chat_id, parts[1], parts[2]], ensure_ascii=False
+                                )
                                 self.state.subagent_history[norm_key] = history
                             else:
                                 self.state.subagent_history[str(key_str)] = history
@@ -1987,7 +2108,9 @@ class StatePersistence:
                                 )
 
                             if isinstance(parts, (list, tuple)) and len(parts) == 3:
-                                norm_key = json.dumps([chat_id, parts[1], parts[2]], ensure_ascii=False)
+                                norm_key = json.dumps(
+                                    [chat_id, parts[1], parts[2]], ensure_ascii=False
+                                )
                                 self.state.subagent_metadata[norm_key] = metadata
                             else:
                                 self.state.subagent_metadata[str(key_str)] = metadata
@@ -2132,7 +2255,9 @@ class MCPHub:
 
     async def stop(self) -> None:
         if self._connecting_mcp:
-            logger.info(f"Cleaning up {len(self._connecting_mcp)} pending MCP connections...")
+            logger.info(
+                f"Cleaning up {len(self._connecting_mcp)} pending MCP connections..."
+            )
             for fut in list(self._connecting_mcp.values()):
                 if not fut.done():
                     fut.cancel()
@@ -2172,14 +2297,30 @@ class PlannerMCPClient:
         await self._client.connect(url=url, headers=isolated_headers)
 
     async def list_tool_specs(self) -> list[dict]:
-        async with self._call_lock:
-            return await self._client.list_tool_specs()
+        return await self._client.list_tool_specs()
 
-    async def call_tool(
-        self, name: str, function_args: Optional[dict] = None
-    ) -> Any:
-        async with self._call_lock:
-            return await self._client.call_tool(name, function_args=function_args or {})
+    async def call_tool(self, name: str, function_args: Optional[dict] = None) -> Any:
+        # v3.15.7: Tool redirection for ComfyUI Parallel execution
+        if name == "generate_image":
+            # Check if this is a ComfyUI generation
+            engine = self.valves.IMAGE_GEN_ENGINE
+            if engine == "comfyui":
+                # We use the isolated metadata already provided by subagent_agent / image_gen_agent
+                # but we call our dedicated parallel driver to prevent loop deadlocks.
+                from open_webui.utils.images.comfyui import ComfyUIWorkflow
+
+                class FakePayload:
+                    def __init__(self, args):
+                        self.workflow = ComfyUIWorkflow(
+                            **json.loads(args.get("workflow", "{}"))
+                        )
+
+                payload = FakePayload(function_args or {})
+                return await ComfyUIParallelExecutor.generate_image(
+                    self.wide_metadata, payload
+                )
+
+        return await self._client.call_tool(name, function_args=function_args or {})
 
     async def disconnect(self) -> None:
         try:
@@ -2189,34 +2330,41 @@ class PlannerMCPClient:
             pass
 
 
-class ComfyUICallContext:
+@asynccontextmanager
+async def _comfyui_isolation_block(metadata: dict, base_client_id: str):
     """
-    Context manager that temporarily provides a unique ComfyUI client_id
-    for the duration of a single tool call. Scoped to the calling coroutine.
-    No global state is modified.
+    Creates a scoped copy of metadata with unique client and session IDs.
+    This prevents WebSocket listener deadlocks in parallel tool calls.
     """
+    # 1. Create a shallow copy of the top-level metadata
+    scoped_metadata = metadata.copy()
 
-    def __init__(self, metadata: dict, base_client_id: str):
-        self._metadata = metadata
-        self._base_client_id = base_client_id
-        self._original_client_id = None
-        # We target the __metadata__ block where OWUI stores session info
-        self._pipe_meta = metadata.get("__metadata__", {})
+    # 2. Specifically isolate the __metadata__ block by cloning it.
+    orig_pipe_meta = metadata.get("__metadata__", {})
+    scoped_pipe_meta = orig_pipe_meta.copy()
 
-    async def __aenter__(self):
-        # Preserve original
-        self._original_client_id = self._pipe_meta.get("client_id")
-        # Inject unique scoped ID
-        unique_id = f"{self._base_client_id}_{uuid.uuid4().hex[:8]}"
-        self._pipe_meta["client_id"] = unique_id
-        return unique_id
+    # 3. Inject unique identity into the scoped copy
+    unique_suffix = uuid4().hex[:8]
+    unique_id = f"{base_client_id}_{unique_suffix}"
 
-    async def __aexit__(self, *args):
-        # Restore original — no lasting state change
-        if self._original_client_id is None:
-            self._pipe_meta.pop("client_id", None)
-        else:
-            self._pipe_meta["client_id"] = self._original_client_id
+    # Spoof ALL identifiers OWUI might use to attach the WS listener
+    scoped_pipe_meta["client_id"] = unique_id
+    scoped_pipe_meta["session_id"] = unique_id
+
+    scoped_metadata["__metadata__"] = scoped_pipe_meta
+
+    # 4. Isolate top-level client identifiers
+    scoped_metadata["client_id"] = unique_id
+    scoped_metadata["__client_id__"] = unique_id
+    scoped_metadata["session_id"] = unique_id
+
+    # v3.15: Activate the context variable for the monkeypatch to trigger
+    token = _is_planner_execution_ctx.set(True)
+    try:
+        # 5. Yield the isolated copy for the duration of the tool call
+        yield scoped_metadata
+    finally:
+        _is_planner_execution_ctx.reset(token)
 
 
 class StreamableHTTPMCPClient:
@@ -2286,13 +2434,147 @@ class StreamableHTTPMCPClient:
 # ---------------------------------------------------------------------------
 
 
-
 # ---------------------------------------------------------------------------
 # Tool Management
 # ---------------------------------------------------------------------------
 
 
+class ComfyUIParallelExecutor:
+    """
+    Parallel-safe driver for ComfyUI that moves blocking WebSocket connections
+    and polling into dedicated worker threads to avoid stalling the event loop.
+    """
+
+    @staticmethod
+    async def generate_image(
+        model: str,
+        form_data: Any,
+        user_id: str,
+        metadata: dict,
+        request: Request,
+    ) -> list[dict]:
+        import open_webui.utils.images.comfyui as comfyui_module
+        from open_webui.routers.images import get_image_data, upload_image
+
+        client_id = metadata.get("client_id", user_id)
+        base_url = request.app.state.config.COMFYUI_BASE_URL
+        api_key = request.app.state.config.COMFYUI_API_KEY
+
+        # Ensure the workflow is a dict
+        workflow = json.loads(form_data.workflow.workflow)
+
+        # 1. Prepare the nested workflow payload identical to how comfyui_create_image does it
+        # (We skip the high-level comfyui_create_image because it has blocking calls in its async body)
+        for node in form_data.workflow.nodes:
+            if node.type:
+                if node.type == "model":
+                    for node_id in node.node_ids:
+                        workflow[node_id]["inputs"][node.key] = model
+                elif node.type == "prompt":
+                    for node_id in node.node_ids:
+                        workflow[node_id]["inputs"][
+                            node.key if node.key else "text"
+                        ] = form_data.prompt
+                elif node.type == "negative_prompt":
+                    for node_id in node.node_ids:
+                        workflow[node_id]["inputs"][
+                            node.key if node.key else "text"
+                        ] = form_data.negative_prompt
+                elif node.type == "width":
+                    for node_id in node.node_ids:
+                        workflow[node_id]["inputs"][
+                            node.key if node.key else "width"
+                        ] = form_data.width
+                elif node.type == "height":
+                    for node_id in node.node_ids:
+                        workflow[node_id]["inputs"][
+                            node.key if node.key else "height"
+                        ] = form_data.height
+                elif node.type == "n":
+                    for node_id in node.node_ids:
+                        workflow[node_id]["inputs"][
+                            node.key if node.key else "batch_size"
+                        ] = form_data.n
+                elif node.type == "steps":
+                    for node_id in node.node_ids:
+                        workflow[node_id]["inputs"][
+                            node.key if node.key else "steps"
+                        ] = form_data.steps
+                elif node.type == "seed":
+                    seed = (
+                        form_data.seed
+                        if form_data.seed
+                        else random.randint(0, 1125899906842624)
+                    )
+                    for node_id in node.node_ids:
+                        workflow[node_id]["inputs"][node.key] = seed
+            else:
+                for node_id in node.node_ids:
+                    workflow[node_id]["inputs"][node.key] = node.value
+
+        # 2. Define the synchronous worker that handles the blocking WebSocket
+        def _threaded_worker():
+            import websocket
+
+            ws = websocket.WebSocket()
+            try:
+                headers = {"Authorization": f"Bearer {api_key}"}
+                ws_url = base_url.replace("http://", "ws://").replace(
+                    "https://", "wss://"
+                )
+
+                # BLOCKING connection happens here - moved to thread!
+                ws.connect(f"{ws_url}/ws?clientId={client_id}", header=headers)
+
+                # BLOCKING polling happens here - moved to thread!
+                return comfyui_module.get_images(
+                    ws, workflow, client_id, base_url, api_key
+                )
+            finally:
+                try:
+                    ws.close()
+                except:
+                    pass
+
+        # 3. Execute the worker in a thread to keep the event loop responsive
+        try:
+            logging.info(
+                f"ComfyUI Parallel Driver: Dispatching generation for client {client_id}"
+            )
+            res = await asyncio.to_thread(_threaded_worker)
+        except Exception as e:
+            logging.exception(f"ComfyUI Parallel Driver: Error in worker thread: {e}")
+            return []
+
+        if not res or "data" not in res:
+            return []
+
+        # 4. Upload results back to Open WebUI (uses existing persistence logic)
+        from open_webui.models.users import Users
+
+        user = Users.get_user_by_id(user_id)
+
+        images = []
+        for image in res["data"]:
+            headers = None
+            if api_key:
+                headers = {"Authorization": f"Bearer {api_key}"}
+
+            image_data, content_type = get_image_data(image["url"], headers)
+            _, url = upload_image(
+                request,
+                image_data,
+                content_type,
+                {**form_data.model_dump(exclude_none=True), **metadata},
+                user,
+            )
+            images.append({"url": url})
+
+        return images
+
+
 class ToolRegistry:
+
     def __init__(self, context: PlannerContext):
         self.context = context
         self.engine: Optional["PlannerEngine"] = None
@@ -2309,6 +2591,46 @@ class ToolRegistry:
         self.subagent_tools_cache = {}
         self.user_skills = context.metadata.get("__user_skills__", {})
         self._resolution_lock = asyncio.Lock()
+
+    def _wrap_comfy_tools(self, tools_dict: dict[str, Any]) -> dict[str, Any]:
+        """
+        Specialized interception for ComfyUI tool sets.
+        Redirects generate_image to the ComfyUIParallelExecutor.
+        """
+        if not tools_dict:
+            return tools_dict
+
+        # Detect image generation engine
+        config = self.request.app.state.config
+        if config.IMAGE_GENERATION_ENGINE != "comfyui":
+            return tools_dict
+
+        for tool_id, tool_info in tools_dict.items():
+            # Check if this is the built-in image tool
+            if tool_id == "generate_image":
+                original_callable = tool_info.get("callable")
+
+                async def wrapped_gen(model=None, **kwargs):
+                    # v3.15: Isolated client_id from tool call metadata
+                    metadata = kwargs.get("__metadata__", self.pipe_metadata)
+                    form_data = kwargs.get("__form_data__")
+
+                    # 1. Capture the pydantic model needed for ComfyUI driver
+                    # If called from builtin tool directly, it is usually already parsed.
+                    if form_data:
+                        return await ComfyUIParallelExecutor.generate_image(
+                            model, form_data, self.user.id, metadata, self.request
+                        )
+
+                    # 2. Fallback to original if we can't safely intercept the form
+                    return await original_callable(model=model, **kwargs)
+
+                tool_info["callable"] = wrapped_gen
+                logger.info(
+                    f"ToolRegistry: Intercepted {tool_id} for Parallel ComfyUI Driver."
+                )
+
+        return tools_dict
 
     async def _resolve_model_skills(
         self, model_info: Any, extra_params: dict
@@ -2628,11 +2950,13 @@ class ToolRegistry:
                 "channels": False,
             }
 
-            return get_builtin_tools(
-                self.request,
-                extra_params,
-                features=active_features,
-                model=m_info,
+            return self._wrap_comfy_tools(
+                get_builtin_tools(
+                    self.request,
+                    extra_params,
+                    features=active_features,
+                    model=m_info,
+                )
             )
         except Exception as e:
             logger.error(f"Failed to load filtered built-in tools: {e}")
@@ -2642,26 +2966,43 @@ class ToolRegistry:
         """Helper to compute the full available subagents list."""
         # virtual_agents
         v_ids = []
-        if getattr(self.valves, "ENABLE_IMAGE_GENERATION_AGENT", True): v_ids.append("image_gen_agent")
-        if getattr(self.valves, "ENABLE_WEB_SEARCH_AGENT", True): v_ids.append("web_search_agent")
-        if getattr(self.valves, "ENABLE_KNOWLEDGE_AGENT", True): v_ids.append("knowledge_agent")
-        if getattr(self.valves, "ENABLE_CODE_INTERPRETER_AGENT", True): v_ids.append("code_interpreter_agent")
-        if getattr(self.valves, "ENABLE_TERMINAL_AGENT", True) and self.pipe_metadata.get("terminal_id"):
+        if getattr(self.valves, "ENABLE_IMAGE_GENERATION_AGENT", True):
+            v_ids.append("image_gen_agent")
+        if getattr(self.valves, "ENABLE_WEB_SEARCH_AGENT", True):
+            v_ids.append("web_search_agent")
+        if getattr(self.valves, "ENABLE_KNOWLEDGE_AGENT", True):
+            v_ids.append("knowledge_agent")
+        if getattr(self.valves, "ENABLE_CODE_INTERPRETER_AGENT", True):
+            v_ids.append("code_interpreter_agent")
+        if getattr(
+            self.valves, "ENABLE_TERMINAL_AGENT", True
+        ) and self.pipe_metadata.get("terminal_id"):
             v_ids.append("terminal_agent")
 
         # extra_params / valves list
-        s_list = self.valves.SUBAGENT_MODELS.split(",") if self.valves.SUBAGENT_MODELS else []
-        t_models = [m.strip() for m in self.valves.WORKSPACE_TERMINAL_MODELS.split(",") if m.strip()]
-        
+        s_list = (
+            self.valves.SUBAGENT_MODELS.split(",")
+            if self.valves.SUBAGENT_MODELS
+            else []
+        )
+        t_models = [
+            m.strip()
+            for m in self.valves.WORKSPACE_TERMINAL_MODELS.split(",")
+            if m.strip()
+        ]
+
         final = []
         for vid in v_ids:
-            if vid not in final: final.append(vid)
+            if vid not in final:
+                final.append(vid)
         for sid in s_list:
             sid = sid.strip()
-            if sid and sid not in final: final.append(sid)
+            if sid and sid not in final:
+                final.append(sid)
         for mid in t_models:
-            if mid and mid not in final: final.append(mid)
-            
+            if mid and mid not in final:
+                final.append(mid)
+
         return final
 
     def get_complete_planner_specs(
@@ -2705,11 +3046,13 @@ class ToolRegistry:
 
         tools_dict: dict[str, Any] = {}
         if ordered_tool_ids:
-            tools_dict = await get_tools(
-                self.request, ordered_tool_ids, self.user, extra_params
+            tools_dict = self._wrap_comfy_tools(
+                await get_tools(self.request, ordered_tool_ids, self.user, extra_params)
             )
         app_models = getattr(self.request.app.state, "MODELS", {})
-        model_ws = merge_workspace_model_dict(app_models, self.context.body.get("model", "") or "")
+        model_ws = merge_workspace_model_dict(
+            app_models, self.context.body.get("model", "") or ""
+        )
         extra_mcp = {
             **extra_params,
             "__model__": model_ws,
@@ -2892,9 +3235,12 @@ class ToolRegistry:
                         "system_message": final_sys,
                         "actual_model": va_model_id,
                         "temperature_override": va.temperature,
-                        "terminal_access": True
-                        if va.type == "terminal" or va.features.get("code_interpreter")
-                        else False,
+                        "terminal_access": (
+                            True
+                            if va.type == "terminal"
+                            or va.features.get("code_interpreter")
+                            else False
+                        ),
                     }
                     self.subagent_tools_cache[model_id] = result
                     return result
@@ -2936,8 +3282,10 @@ class ToolRegistry:
                 s_tools_dict: dict[str, Any] = {}
                 if ordered_sub_ids:
                     try:
-                        assigned_tools = await get_tools(
-                            self.request, ordered_sub_ids, self.user, extra_params
+                        assigned_tools = self._wrap_comfy_tools(
+                            await get_tools(
+                                self.request, ordered_sub_ids, self.user, extra_params
+                            )
                         )
                         if assigned_tools:
                             s_tools_dict.update(assigned_tools)
@@ -2968,7 +3316,11 @@ class ToolRegistry:
                     self.pipe_metadata,
                     extra_mcp_sub,
                     extra_params.get("__event_emitter__"),
-                    mcp_handler=self.engine.mcp_hub.get_or_create_client if self.engine and self.engine.mcp_hub else None,
+                    mcp_handler=(
+                        self.engine.mcp_hub.get_or_create_client
+                        if self.engine and self.engine.mcp_hub
+                        else None
+                    ),
                 )
                 if mcp_sub:
                     s_tools_dict.update(mcp_sub)
@@ -3053,10 +3405,12 @@ class ToolRegistry:
                     ),
                     "system_message": model_system_message,
                     "actual_model": model_id,
-                    "terminal_access": True
-                    if model_id in workspace_terminal_models
-                    or "code_interpreter" in s_tools_dict
-                    else False,
+                    "terminal_access": (
+                        True
+                        if model_id in workspace_terminal_models
+                        or "code_interpreter" in s_tools_dict
+                        else False
+                    ),
                 }
                 self.subagent_tools_cache[model_id] = result
                 return result
@@ -3978,7 +4332,9 @@ class SubagentManager:
                 # calls to the same nonexistent tool — a hard-stop signal. Normal errors return False.
                 repeated_missing_tool_failure = any(gather_results)
                 if repeated_missing_tool_failure:
-                    sub_final_answer_chunks.append("[Subagent stopped: repeated missing-tool failures.]")
+                    sub_final_answer_chunks.append(
+                        "[Subagent stopped: repeated missing-tool failures.]"
+                    )
                     break
             else:
                 # Sequential subagent tool execution
@@ -3997,7 +4353,9 @@ class SubagentManager:
                     if _should_break:
                         break
                 if _should_break:
-                    sub_final_answer_chunks.append("[Subagent stopped: repeated missing-tool failures.]")
+                    sub_final_answer_chunks.append(
+                        "[Subagent stopped: repeated missing-tool failures.]"
+                    )
                     break
 
         await self.ui.emit_status(f"Agent {model_id} completed {task_id}.")
@@ -4317,59 +4675,68 @@ class SubagentManager:
             )
             filtered_args = {k: v for k, v in args_obj.items() if k in allowed_keys}
 
-            # Context variables required by many built-in tools
-            context_vars = {
-                "__request__": self.context.request,
-                "__user__": self.metadata.get("__user__"),
-                "__event_emitter__": self.queue_emitter,
-                "__event_call__": self.context.event_call,
-                "__chat_id__": self.context.chat_id
-                or self.metadata.get("chat_id"),
-                "__message_id__": self.context.message_id
-                or self.metadata.get("message_id"),
-                "__files__": self.metadata.get("__files__"),
-                "__metadata__": self.metadata.get("__metadata__"),
-            }
-            # v3.15: Safe Signature-based Injection
-            # We inject special context variables only if they are in the tool's signature.
-            try:
-                import inspect
-                sig = inspect.signature(target_tool["callable"])
-                for k, v in context_vars.items():
-                    if v is not None and k in sig.parameters and k not in filtered_args:
-                        filtered_args[k] = v
-            except Exception as e:
-                logger.warning(f"Signature inspection failed for subagent tool {name}: {e}")
-
-            # Execute tool: configurable timeout (default 1200s)
-            logger.debug(f"[Subagent: {model_id}] Calling tool {name}...")
-
-            # v3.15: Scoped ComfyUI isolation (Patch Fix)
+            # v3.15: Scoped ComfyUI isolation (Fix: Avoid shared mutation deadlocks and signature errors)
             is_comfy_call = name in ("generate_image", "edit_image") and target_tool
             if is_comfy_call:
                 base_cid = self.metadata.get("__metadata__", {}).get(
                     "client_id", self.context.chat_id or "planner"
                 )
-                ctx_manager = ComfyUICallContext(self.metadata, base_cid)
+                ctx_manager = _comfyui_isolation_block(self.metadata, base_cid)
             else:
-                ctx_manager = contextlib.nullcontext()
+                ctx_manager = contextlib.nullcontext(self.metadata)
 
-            async with ctx_manager:
+            async with ctx_manager as scoped_meta:
+                # 1. Update context variables with isolated metadata (only if is_comfy_call)
+                # context_vars inherited from parent scope (must be defined before or inside)
+                context_vars = {
+                    "__request__": self.context.request,
+                    "__user__": self.metadata.get("__user__"),
+                    "__event_emitter__": self.queue_emitter,
+                    "__event_call__": self.context.event_call,
+                    "__chat_id__": self.context.chat_id or self.metadata.get("chat_id"),
+                    "__message_id__": self.context.message_id
+                    or self.metadata.get("message_id"),
+                    "__files__": self.metadata.get("__files__"),
+                    "__metadata__": scoped_meta.get("__metadata__"),
+                    "client_id": scoped_meta.get("client_id"),
+                    "__client_id__": scoped_meta.get("__client_id__"),
+                }
+
+                # 2. Safe Signature-based Injection
+                # We inject special context variables only if they are in the tool's signature.
+                try:
+                    import inspect
+
+                    sig = inspect.signature(target_tool["callable"])
+                    for k, v in context_vars.items():
+                        if (
+                            v is not None
+                            and k in sig.parameters
+                            and k not in filtered_args
+                        ):
+                            filtered_args[k] = v
+                except Exception as e:
+                    logger.warning(
+                        f"Signature inspection failed for subagent tool {name}: {e}"
+                    )
+
+                # 3. Execute tool: configurable timeout (default 1200s)
+                logger.debug(f"[Subagent: {model_id}] Calling tool {name}...")
                 async with asyncio.timeout(float(self.valves.SUBAGENT_TIMEOUT)):
                     res = await target_tool["callable"](**filtered_args)
 
-            # v3.15: Robust tool result processing parity with main planner engine.
-            # We use process_tool_result to handle file uploads, base64 conversion,
-            # and rich object decomposition.
-            tc_return = process_tool_result(
-                self.context.request,
-                name,
-                res,
-                target_tool.get("type", ""),
-                False,
-                self.metadata.get("__metadata__"),
-                user_obj,
-            )
+                # 4. Process tool result
+                # v3.15: CRITICAL. Use the FULL scoped_meta so that polling
+                # handles the spoofed IDs while filing handles the real IDs.
+                tc_return = process_tool_result(
+                    self.context.request,
+                    name,
+                    res,
+                    target_tool.get("type", ""),
+                    False,
+                    scoped_meta,
+                    user_obj,
+                )
 
             # Step 1: Unpack result, files, and embeds
             tc_files = []
@@ -4419,7 +4786,7 @@ class SubagentManager:
                                 fid = f.get("id") or f.get("file_id") or f.get("url")
                                 if fid and fid not in existing_ids:
                                     current_files.append(f)
-                    
+
                     # v3.15: Main planner tool files are also tracked in produced_files for final sync
                     self.engine.produced_files.extend(tc_files)
 
@@ -4830,7 +5197,6 @@ class PlannerEngine:
         self._files_lock = asyncio.Lock()
         self.env = Utils.get_env_placeholders(context.request, context.valves)
 
-
     async def stop(self) -> None:
         if self.active_tasks:
             logger.info(f"Cancelling {len(self.active_tasks)} active subagent tasks...")
@@ -4872,6 +5238,93 @@ class PlannerEngine:
     async def _emit_message(self, delta: str) -> None:
         """Helper to emit an append-only message event (efficient for content deltas)."""
         await self.ui.emitter({"type": "message", "data": {"content": delta}})
+
+    async def _delayed_sync_with_backoff(
+        self,
+        chat_id: str,
+        message_id: str,
+        expected_files: list,
+        max_attempts: int = 4,
+        base_delay: float = 0.5,
+    ):
+        """
+        Retries file sync with exponential backoff until the DB reflects
+        the expected file list or max attempts are exhausted.
+
+        Delays: 0.5s, 1.0s, 2.0s, 4.0s (total max wait: ~7.5s)
+        This is more robust than a single 2s sleep under load.
+        """
+        expected_ids = {
+            f.get("id") or f.get("file_id") or f.get("url")
+            for f in expected_files
+            if isinstance(f, dict)
+        }
+
+        for attempt in range(max_attempts):
+            delay = base_delay * (2**attempt)  # 0.5, 1.0, 2.0, 4.0
+
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                logger.debug(
+                    f"[Planner] Delayed sync cancelled at attempt {attempt + 1} "
+                    f"— primary sync already committed."
+                )
+                return
+
+            try:
+                # Idempotency check: read current DB state before writing
+                current_message = await asyncio.to_thread(
+                    Chats.get_message_by_id_and_message_id,
+                    chat_id,
+                    message_id,
+                )
+
+                if current_message:
+                    current_ids = {
+                        f.get("id") or f.get("file_id") or f.get("url")
+                        for f in current_message.get("files", [])
+                        if isinstance(f, dict)
+                    }
+
+                    # If all expected files are already in DB, we're done
+                    missing = expected_ids - current_ids
+                    if not missing:
+                        logger.debug(
+                            f"[Planner] Delayed sync: all {len(expected_ids)} files "
+                            f"already in DB at attempt {attempt + 1}. Skipping write."
+                        )
+                        return
+
+                    logger.info(
+                        f"[Planner] Delayed sync attempt {attempt + 1}: "
+                        f"{len(missing)} files missing from DB. Writing..."
+                    )
+
+                # Write only the files that are actually missing
+                await asyncio.to_thread(
+                    Chats.add_message_files_by_id_and_message_id,
+                    chat_id,
+                    message_id,
+                    expected_files,  # add_message_files is idempotent by file ID
+                )
+                logger.info(
+                    f"[Planner] Delayed sync succeeded at attempt {attempt + 1}."
+                )
+                return
+
+            except asyncio.CancelledError:
+                logger.debug("[Planner] Delayed sync cancelled during DB write.")
+                return
+            except Exception as e:
+                logger.warning(
+                    f"[Planner] Delayed sync attempt {attempt + 1} failed: {e}"
+                )
+                if attempt == max_attempts - 1:
+                    logger.error(
+                        f"[Planner] Delayed sync exhausted all {max_attempts} attempts. "
+                        f"Files may be missing from message {message_id}."
+                    )
 
     async def run(
         self,
@@ -5010,36 +5463,31 @@ class PlannerEngine:
         # when it saves the final message state, we spawn a background task that sleeps
         # briefly and then enforces the true file list.
         if final_files and target_chat_id and target_msg_id:
-            # Fix 5: Track the delayed sync task so engine.stop() can cancel it on shutdown.
-            # The primary consolidated sync already ran above; this is purely a safety net
-            # that re-asserts the final file list after OWUI's native completion handler runs.
-            _ds_task: asyncio.Task | None = None
-
-            async def _delayed_sync():
-                try:
-                    await asyncio.sleep(2.0)
-                    await asyncio.to_thread(
-                        Chats.add_message_files_by_id_and_message_id,
-                        target_chat_id,
-                        target_msg_id,
-                        final_files,
-                    )
-                    logger.info(
-                        f"[Planner] Delayed final sync: Restored {len(final_files)} files to DB."
-                    )
-                except asyncio.CancelledError:
-                    logger.debug("[Planner] Delayed sync cancelled during shutdown — primary sync already committed.")
-                except Exception as e:
-                    logger.error(f"[Planner] Delayed sync failed: {e}")
-                finally:
-                    if _ds_task is not None and _ds_task in self.active_tasks:
-                        self.active_tasks.remove(_ds_task)
-
-            _ds_task = asyncio.ensure_future(_delayed_sync())
+            _ds_task = asyncio.ensure_future(
+                self._delayed_sync_with_backoff(
+                    chat_id=target_chat_id,
+                    message_id=target_msg_id,
+                    expected_files=final_files,
+                    max_attempts=4,
+                    base_delay=0.5,
+                )
+            )
             self.active_tasks.append(_ds_task)
 
+            # Cleanup wrapper
+            original = _ds_task
+
+            async def _cleanup_wrapper():
+                try:
+                    await original
+                finally:
+                    if original in self.active_tasks:
+                        self.active_tasks.remove(original)
+
+            asyncio.ensure_future(_cleanup_wrapper())
+
         # We yield the final content as the last token
-        # v3.15: Terminal status emission. 
+        # v3.15: Terminal status emission.
         # We call this BEFORE yielding the final content to ensure the UI captures it.
         await self.ui.emit_status("Task completed.", done=True)
 
@@ -5308,9 +5756,7 @@ class PlannerEngine:
         exec_sys = PromptBuilder.build_system_prompt(
             valves,
             user_valves,
-            self.registry.get_complete_planner_specs(
-                list(self.state.tasks.keys())
-            ),
+            self.registry.get_complete_planner_specs(list(self.state.tasks.keys())),
             metadata=self.metadata,
             mode="execute",
             messages=distilled_history,
@@ -5508,11 +5954,9 @@ class PlannerEngine:
     ) -> dict:
         """Performs a single LLM turn for the planner with live reasoning and clean content streaming."""
         tc_dict, content_chunks, reasoning_chunks = {}, [], []
-        
+
         # Get complete planner toolset (internal + domain)
-        tools = self.registry.get_complete_planner_specs(
-            list(self.state.tasks.keys())
-        )
+        tools = self.registry.get_complete_planner_specs(list(self.state.tasks.keys()))
         if external_tools_dict:
             tools.extend(
                 [
@@ -5607,7 +6051,11 @@ class PlannerEngine:
             elif etype in ["content", "tool_calls"]:
                 if reasoning_buffer:
                     # Seal the reasoning block with tool calls stripped
-                    dur = int(max(1, round(time.monotonic() - reasoning_start_time))) if reasoning_start_time else 1
+                    dur = (
+                        int(max(1, round(time.monotonic() - reasoning_start_time)))
+                        if reasoning_start_time
+                        else 1
+                    )
                     display = Utils.hide_tool_calls(reasoning_buffer)
                     display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
                     display_quoted = "\n".join(
@@ -5635,7 +6083,7 @@ class PlannerEngine:
                     if new_total != self.total_emitted:
                         # v3.6/v3.15 Optimized Streaming: Determine if we need a full replace (structural change)
                         # or can use a silent append delta (performance).
-                        delta = new_total[len(self.total_emitted):]
+                        delta = new_total[len(self.total_emitted) :]
 
                         # Fix 1: Use explicit _reasoning_just_sealed flag instead of the fragile
                         # is_transition substring heuristic that could false-negative when
@@ -5678,7 +6126,11 @@ class PlannerEngine:
                 break
 
         if reasoning_buffer:  # Final seal if no content/tools followed
-            dur = int(max(1, round(time.monotonic() - reasoning_start_time))) if reasoning_start_time else 1
+            dur = (
+                int(max(1, round(time.monotonic() - reasoning_start_time)))
+                if reasoning_start_time
+                else 1
+            )
             display = Utils.hide_tool_calls(reasoning_buffer)
             display = Utils.THINKING_TAG_CLEANER_PATTERN.sub("", display)
             display_quoted = "\n".join(
@@ -5752,8 +6204,12 @@ class PlannerEngine:
         yield ""  # Heartbeat
 
         # 2. Sequential or Parallel execution
-        subagent_calls = [tc for tc in tool_calls if tc["function"]["name"] == "call_subagent"]
-        self.metadata["__consolidated__"] = valves.PARALLEL_TOOL_EXECUTION and len(subagent_calls) > 1
+        subagent_calls = [
+            tc for tc in tool_calls if tc["function"]["name"] == "call_subagent"
+        ]
+        self.metadata["__consolidated__"] = (
+            valves.PARALLEL_TOOL_EXECUTION and len(subagent_calls) > 1
+        )
         if self.metadata["__consolidated__"]:
             await self.ui.emit_status(f"Consulting {len(subagent_calls)} agents...")
 
@@ -5807,7 +6263,13 @@ class PlannerEngine:
             )
             exec_history[history_tail_start:] = tool_tail
 
-            total_emitted = ui_state.total_emitted
+            # After all parallel tasks complete, perform ONE authoritative final emit
+            # that reflects the true terminal state — regardless of intermediate emit ordering.
+            async with ui_state.lock:
+                authoritative_total = ui_state.total_emitted
+
+            await self._emit_replace(authoritative_total)
+            total_emitted = authoritative_total
         else:
             # Sequential execution (original behavior)
             for tc in sorted_tcs:
@@ -5874,7 +6336,7 @@ class PlannerEngine:
 
         tool_res = ""
         tc_files = []
-        tc_embeds = [] # v3.15: Initialise to avoid locals() check failure on exception
+        tc_embeds = []  # v3.15: Initialise to avoid locals() check failure on exception
         try:
             match func_name:
                 case "update_state":
@@ -5908,53 +6370,66 @@ class PlannerEngine:
                     # v3.15: Main Planner Tool Context Injection (Parity with subagents)
                     # We inject special context variables if requested by the tool signature,
                     # bypassing the JSON schema (allowed_keys) which often excludes them.
-                    context_vars = {
-                        "__request__": self.context.request,
-                        "__user__": self.metadata.get("__user__"),
-                        "__event_emitter__": self.ui.emitter,
-                        "__event_call__": self.context.event_call,
-                        "__chat_id__": self.context.chat_id
-                        or self.metadata.get("chat_id"),
-                        "__message_id__": self.context.message_id
-                        or self.metadata.get("message_id"),
-                        "__files__": self.metadata.get("__files__"),
-                        "__metadata__": self.metadata.get("__metadata__"),
-                    }
-
-                    # v3.15: Main Planner Tool Context Injection (Parity with subagents)
-                    # We inject special context variables only if they are in the tool's signature.
-                    # We use self.ui.emitter (the structural QueueEmitter) to ensure
-                    # events are properly queued and synchronized with the UI.
-                    try:
-                        import inspect
-                        sig = inspect.signature(tool_data["callable"])
-                        for k, v in context_vars.items():
-                            if v is not None and k in sig.parameters and k not in filtered_args:
-                                filtered_args[k] = v
-                    except Exception as e:
-                        logger.warning(f"Signature inspection failed for main planner tool {name}: {e}")
-
-                    # v3.15: Scoped ComfyUI isolation (Patch Fix)
+                    # v3.15: Scoped ComfyUI isolation (Fix: Avoid shared mutation deadlocks and signature errors)
                     is_comfy_call = name in ("generate_image", "edit_image")
                     if is_comfy_call:
                         base_cid = self.metadata.get("__metadata__", {}).get(
                             "client_id", self.context.chat_id or "planner"
                         )
-                        ctx_manager = ComfyUICallContext(self.metadata, base_cid)
+                        ctx_manager = _comfyui_isolation_block(self.metadata, base_cid)
                     else:
-                        ctx_manager = contextlib.nullcontext()
+                        ctx_manager = contextlib.nullcontext(self.metadata)
 
-                    async with ctx_manager:
+                    async with ctx_manager as scoped_meta:
+                        # 1. Update context variables with isolated metadata (only if is_comfy_call)
+                        context_vars = {
+                            "__request__": self.context.request,
+                            "__user__": self.metadata.get("__user__"),
+                            "__event_emitter__": self.ui.emitter,
+                            "__event_call__": self.context.event_call,
+                            "__chat_id__": self.context.chat_id
+                            or self.metadata.get("chat_id"),
+                            "__message_id__": self.context.message_id
+                            or self.metadata.get("message_id"),
+                            "__files__": self.metadata.get("__files__"),
+                            "__metadata__": scoped_meta.get("__metadata__"),
+                            "client_id": scoped_meta.get("client_id"),
+                            "__client_id__": scoped_meta.get("__client_id__"),
+                        }
+
+                        # 2. Main Planner Tool Context Injection (Parity with subagents)
+                        # We inject special context variables only if they are in the tool's signature.
+                        try:
+                            import inspect
+
+                            sig = inspect.signature(tool_data["callable"])
+                            for k, v in context_vars.items():
+                                if (
+                                    v is not None
+                                    and k in sig.parameters
+                                    and k not in filtered_args
+                                ):
+                                    filtered_args[k] = v
+                        except Exception as e:
+                            logger.warning(
+                                f"Signature inspection failed for main planner tool {name}: {e}"
+                            )
+
+                        # 3. Call tool
                         res = await tool_data["callable"](**filtered_args)
-                    tc_return = process_tool_result(
-                        self.context.request,
-                        name,
-                        res,
-                        tool_data.get("type", ""),
-                        False,
-                        self.metadata.get("__metadata__"),
-                        user_obj,
-                    )
+
+                        # 4. Process tool result
+                        # v3.15: CRITICAL. Use the FULL scoped_meta so that polling
+                        # handles the spoofed IDs while filing handles the real IDs.
+                        tc_return = process_tool_result(
+                            self.context.request,
+                            name,
+                            res,
+                            tool_data.get("type", ""),
+                            False,
+                            scoped_meta,
+                            user_obj,
+                        )
 
                     # Handle multiple return values (tuple: str/dict, files, embeds) (v3.15)
                     res_str = ""
@@ -5981,17 +6456,24 @@ class PlannerEngine:
                         target_chat_id = self.context.chat_id or chat_id
                         target_msg_id = self.context.message_id
                         if target_chat_id and target_msg_id:
-                            try:
-                                # Synchronize with DB for multi-turn persistence
-                                Chats.add_message_files_by_id_and_message_id(
-                                    target_chat_id, target_msg_id, tc_files
-                                )
-                                # Update internal metadata list for this turn
-                                current_files = self.metadata.get("__files__")
-                                if isinstance(current_files, list):
-                                    current_files.extend(tc_files)
-                            except Exception as e:
-                                logger.error(f"Failed to persist tool files to DB: {e}")
+                            # v3.9.0: Thread-safe lock for parallel planner tools
+                            async with self._files_lock:
+                                try:
+                                    # Synchronize with DB for multi-turn persistence using thread wrapper
+                                    await asyncio.to_thread(
+                                        Chats.add_message_files_by_id_and_message_id,
+                                        target_chat_id,
+                                        target_msg_id,
+                                        tc_files,
+                                    )
+                                    # Update internal metadata list for this turn
+                                    current_files = self.metadata.get("__files__")
+                                    if isinstance(current_files, list):
+                                        current_files.extend(tc_files)
+                                except Exception as e:
+                                    logger.error(
+                                        f"Failed to persist tool files to DB: {e}"
+                                    )
 
                     tool_res = res_str
                 case _:
@@ -6045,17 +6527,24 @@ class PlannerEngine:
 
         # Real-time UI updates for parallel mode
         if ui_state:
+            snapshot = None
+            current_version = None
+
             async with ui_state.lock:
-                # Direct sibling replacement in total_emitted
+                # All mutation happens under lock
                 ui_state.total_emitted = ui_state.total_emitted.replace(
                     tc_tag_map[call_id], done_tag
                 )
                 tc_tag_map[call_id] = done_tag
-                current_total = ui_state.total_emitted
-                self.total_emitted = current_total
+                ui_state.version += 1
+                current_version = ui_state.version
+                snapshot = ui_state.total_emitted  # Take snapshot under lock
+                self.total_emitted = snapshot
 
-            # Release lock before slow streaming emission
-            await self._emit_replace(current_total)
+            # Emit the snapshot taken under lock.
+            # If another coroutine has since mutated ui_state, that's fine —
+            # the post-gather authoritative emit in _handle_tool_calls will correct the final state.
+            await self._emit_replace(snapshot)
 
         return done_tag, tool_res, msg_dict
 
@@ -6098,7 +6587,8 @@ class PlannerEngine:
             preview = result[:300] + "..." if len(result) > 300 else result
             results_summary.append(f"  @{tid}: {preview}")
 
-        appended_summary = False
+        # Build the injection message as a named object for identity-based cleanup
+        summary_message = None
         results_block = ""
         if results_summary:
             results_block = (
@@ -6106,170 +6596,183 @@ class PlannerEngine:
                 + "\n".join(results_summary)
                 + "\n\n"
             )
-            exec_history.append({"role": "system", "content": results_block})
-            appended_summary = True
+            summary_message = {"role": "system", "content": results_block}
 
-        judge_msg = (
-            f"{results_block}"
-            f"SYSTEM: Review the conversation history above.\n"
-            f"The following tasks have not been marked as completed:\n"
-            f"{task_context_block}\n\n"
-            f"For each incomplete task, determine whether the conversation history already contains "
-            f"a completed result that satisfies the task description. If yes, mark it 'completed'. "
-            f"If the task was genuinely not attempted or failed, mark it 'failed' and provide a "
-            f"specific follow-up instruction that will resolve it.\n"
-            f"Respond with a JSON object following the schema exactly."
-        )
+        # The context manager guarantees cleanup even on CancelledError
+        async with (
+            _temporary_history_injection(exec_history, summary_message)
+            if summary_message
+            else contextlib.nullcontext()
+        ):
 
-        # v3.6.8: Use a copy to avoid mutating the core execution history in place
-        # and prevent 'assistant' -> 'assistant' invariant violations if retrying.
-        msgs = copy.deepcopy(exec_history)
-        if not msgs or msgs[-1].get("role") != "assistant":
-            msgs.append({"role": "assistant", "content": content})
-        else:
-            # If the last message is already assistant, update the copy's content
-            if msgs[-1].get("content") != content:
-                msgs[-1]["content"] = content
+            judge_msg = (
+                f"{results_block}"
+                f"SYSTEM: Review the conversation history above.\n"
+                f"The following tasks have not been marked as completed:\n"
+                f"{task_context_block}\n\n"
+                f"For each incomplete task, determine whether the conversation history already contains "
+                f"a completed result that satisfies the task description. If yes, mark it 'completed'. "
+                f"If the task was genuinely not attempted or failed, mark it 'failed' and provide a "
+                f"specific follow-up instruction that will resolve it.\n"
+                f"Respond with a JSON object following the schema exactly."
+            )
 
-        # v3.6.8: Use msgs for the judge call
-        judge_body = {
-            **body,
-            "model": valves.REVIEW_MODEL or valves.PLANNER_MODEL,
-            "messages": msgs + [{"role": "user", "content": judge_msg}],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "judge_verdict",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "updates": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "task_id": {"type": "string"},
-                                        "status": {
-                                            "type": "string",
-                                            "enum": ["completed", "failed"],
+            # v3.6.8: Use a copy to avoid mutating the core execution history in place
+            # and prevent 'assistant' -> 'assistant' invariant violations if retrying.
+            msgs = copy.deepcopy(exec_history)
+            if not msgs or msgs[-1].get("role") != "assistant":
+                msgs.append({"role": "assistant", "content": content})
+            else:
+                # If the last message is already assistant, update the copy's content
+                if msgs[-1].get("content") != content:
+                    msgs[-1]["content"] = content
+
+            # v3.6.8: Use msgs for the judge call
+            judge_body = {
+                **body,
+                "model": valves.REVIEW_MODEL or valves.PLANNER_MODEL,
+                "messages": msgs + [{"role": "user", "content": judge_msg}],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "judge_verdict",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "updates": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "task_id": {"type": "string"},
+                                            "status": {
+                                                "type": "string",
+                                                "enum": ["completed", "failed"],
+                                            },
+                                            "description": {"type": "string"},
                                         },
-                                        "description": {"type": "string"},
+                                        "required": [
+                                            "task_id",
+                                            "status",
+                                            "description",
+                                        ],
+                                        "additionalProperties": False,
                                     },
-                                    "required": ["task_id", "status", "description"],
-                                    "additionalProperties": False,
                                 },
+                                "follow_up_prompt": {"type": "string"},
                             },
-                            "follow_up_prompt": {"type": "string"},
+                            "required": ["updates", "follow_up_prompt"],
+                            "additionalProperties": False,
                         },
-                        "required": ["updates", "follow_up_prompt"],
-                        "additionalProperties": False,
                     },
                 },
-            },
-            "metadata": self.metadata.get("__metadata__", {}),
-        }
+                "metadata": self.metadata.get("__metadata__", {}),
+            }
 
-        max_judge_retries = 1
-        current_judge_retry = 0
+            max_judge_retries = 1
+            current_judge_retry = 0
 
-        while current_judge_retry <= max_judge_retries:
-            judge_chunks = []
-            reasoning_chunks = []
-            reasoning_start_time = time.monotonic()
+            while current_judge_retry <= max_judge_retries:
+                judge_chunks = []
+                reasoning_chunks = []
+                reasoning_start_time = time.monotonic()
 
-            async for ev in Utils.get_streaming_completion(
-                self.context.request, judge_body, user_obj
-            ):
-                etype = ev["type"]
-                if etype == "reasoning":
-                    reasoning_chunks.append(ev.get("text", ""))
-                elif etype == "content":
-                    judge_chunks.append(ev["text"])
+                async for ev in Utils.get_streaming_completion(
+                    self.context.request, judge_body, user_obj
+                ):
+                    etype = ev["type"]
+                    if etype == "reasoning":
+                        reasoning_chunks.append(ev.get("text", ""))
+                    elif etype == "content":
+                        judge_chunks.append(ev["text"])
 
-            try:
-                # Clean thinking tags from judge output before JSON parsing
-                raw = Utils.clean_thinking("".join(judge_chunks))
-                reasoning = "".join(reasoning_chunks)
+                try:
+                    # Clean thinking tags from judge output before JSON parsing
+                    raw = Utils.clean_thinking("".join(judge_chunks))
+                    reasoning = "".join(reasoning_chunks)
 
-                brace_start = raw.find("{")
-                if brace_start != -1:
-                    judge_res = json.loads(raw[brace_start:])
-                    updated = False
-                    for upd in judge_res.get("updates", []):
-                        tid, status = upd.get("task_id"), upd.get("status")
-                        if tid in self.state.tasks and status in [
-                            "completed",
-                            "failed",
-                        ]:
-                            self.state.update_task(tid, status, upd.get("description"))
-                            updated = True
+                    brace_start = raw.find("{")
+                    if brace_start != -1:
+                        judge_res = json.loads(raw[brace_start:])
+                        updated = False
+                        for upd in judge_res.get("updates", []):
+                            tid, status = upd.get("task_id"), upd.get("status")
+                            if tid in self.state.tasks and status in [
+                                "completed",
+                                "failed",
+                            ]:
+                                self.state.update_task(
+                                    tid, status, upd.get("description")
+                                )
+                                updated = True
 
-                    if updated:
-                        self.current_plan_html = self.ui.get_html_status_block(
-                            self.state.tasks
-                        )
-                        await self._emit_replace(total_emitted)
-
-                    follow_up = judge_res.get("follow_up_prompt", "").strip()
-                    still_incomplete = [
-                        tid
-                        for tid, info in self.state.tasks.items()
-                        if info.status not in ["completed", "failed"]
-                    ]
-
-                    if still_incomplete and follow_up:
-                        exec_history.append(
-                            {
-                                "role": "user",
-                                "content": f"SYSTEM: The following tasks are still incomplete: {', '.join(still_incomplete)}. {follow_up}",
-                            }
-                        )
-
-                        # If judge proposed a follow-up, show its reasoning as a "Thought" block (v3/v4 hybrid)
-                        if reasoning.strip():
-                            dur = int(max(1, round(time.monotonic() - reasoning_start_time)))
-                            display_quoted = "\n".join(
-                                f"> {l}" if not l.startswith(">") else l
-                                for l in reasoning.splitlines()
+                        if updated:
+                            self.current_plan_html = self.ui.get_html_status_block(
+                                self.state.tasks
                             )
-                            total_emitted += f'<details type="reasoning" done="true" duration="{dur}">\n<summary>Judge Verification Feedback</summary>\n{display_quoted}\n</details>\n'
                             await self._emit_replace(total_emitted)
 
-                        await self.ui.emit_status(
-                            "Continuing based on judge feedback..."
+                        follow_up = judge_res.get("follow_up_prompt", "").strip()
+                        still_incomplete = [
+                            tid
+                            for tid, info in self.state.tasks.items()
+                            if info.status not in ["completed", "failed"]
+                        ]
+
+                        if still_incomplete and follow_up:
+                            exec_history.append(
+                                {
+                                    "role": "user",
+                                    "content": f"SYSTEM: The following tasks are still incomplete: {', '.join(still_incomplete)}. {follow_up}",
+                                }
+                            )
+
+                            # If judge proposed a follow-up, show its reasoning as a "Thought" block (v3/v4 hybrid)
+                            if reasoning.strip():
+                                dur = int(
+                                    max(
+                                        1,
+                                        round(time.monotonic() - reasoning_start_time),
+                                    )
+                                )
+                                display_quoted = "\n".join(
+                                    f"> {l}" if not l.startswith(">") else l
+                                    for l in reasoning.splitlines()
+                                )
+                                total_emitted += f'<details type="reasoning" done="true" duration="{dur}">\n<summary>Judge Verification Feedback</summary>\n{display_quoted}\n</details>\n'
+                                await self._emit_replace(total_emitted)
+
+                            await self.ui.emit_status(
+                                "Continuing based on judge feedback..."
+                            )
+                            return True, total_emitted
+                        break
+                    else:
+                        raise ValueError(
+                            f"No JSON brace found in judge response: {raw}"
                         )
-                        if appended_summary and exec_history:
-                            exec_history.pop()
-                        return True, total_emitted
-                    break
-                else:
-                    raise ValueError(f"No JSON brace found in judge response: {raw}")
-            except Exception as e:
-                if current_judge_retry < max_judge_retries:
-                    logger.warning(
-                        f"Judge verification parsing failed: {e}. Retrying..."
-                    )
-                    judge_body["messages"].append(
-                        {"role": "assistant", "content": "".join(judge_chunks)}
-                    )
-                    judge_body["messages"].append(
-                        {
-                            "role": "user",
-                            "content": "SYSTEM: Your verdict was not a valid JSON. Please return strictly a JSON object following the schema.",
-                        }
-                    )
-                    current_judge_retry += 1
-                    continue
-                else:
-                    logger.warning(f"Judge verification failed after retries: {e}")
-                    break
+                except Exception as e:
+                    if current_judge_retry < max_judge_retries:
+                        logger.warning(
+                            f"Judge verification parsing failed: {e}. Retrying..."
+                        )
+                        judge_body["messages"].append(
+                            {"role": "assistant", "content": "".join(judge_chunks)}
+                        )
+                        judge_body["messages"].append(
+                            {
+                                "role": "user",
+                                "content": "SYSTEM: Your verdict was not a valid JSON. Please return strictly a JSON object following the schema.",
+                            }
+                        )
+                        current_judge_retry += 1
+                        continue
+                    else:
+                        logger.warning(f"Judge verification failed after retries: {e}")
+                        break
 
-        if appended_summary and exec_history:
-            exec_history.pop()
-
-        # Revert: Don't prepend here; let PlannerEngine.run handle it once.
-        return False, total_emitted
+            return False, total_emitted
 
 
 # ---------------------------------------------------------------------------
@@ -6420,6 +6923,8 @@ Your goal is to fulfill the user's request.""",
         self.type = "manifold"
         self.valves = self.Valves()
         self.user_valves = self.UserValves()
+        # Initialize ComfyUI isolation patch on first instantiation
+        _apply_comfy_patch()
 
     def pipes(self) -> list[dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
@@ -6577,7 +7082,6 @@ Your goal is to fulfill the user's request.""",
 
         # Life cycle: Step 3.1: Start Background Consumption Workers
         ui_worker = asyncio.create_task(self._ui_worker(ui_queue, __event_emitter__))
-
 
         # Use a generator to keep the SSE stream active and the "Exploring" status valid
         try:
