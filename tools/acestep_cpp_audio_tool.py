@@ -567,8 +567,13 @@ class Tools:
             default=True,
             description="Use colorful rainbow gradient player.",
         )
-        steps: int = Field(default=8, description="Sampling steps.")
+        steps: int = Field(default=12, description="Sampling steps (inferenceSteps).")
         seed: int = Field(default=-1, description="Random seed (-1 for random).")
+        guidance_scale: float = Field(default=9.0, description="Guidance scale (CFG).")
+        lm_cfg_scale: float = Field(default=2.2, description="LM CFG scale.")
+        temperature: float = Field(default=0.8, description="LM sampling temperature.")
+        top_p: float = Field(default=0.92, description="LM sampling top_p.")
+        shift: int = Field(default=3, description="Semantic shift value.")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -669,7 +674,20 @@ class Tools:
             "randomSeed": False,
             "seed": gen_seed,
             "batchSize": batch_size,
-            "audioFormat": "mp3"
+            "audioFormat": "mp3",
+            "inferenceSteps": user_valves.steps,
+            "guidanceScale": user_valves.guidance_scale,
+            "lmCfgScale": user_valves.lm_cfg_scale,
+            "lmTemperature": user_valves.temperature,
+            "lmTopP": user_valves.top_p,
+            "shift": user_valves.shift,
+            "useAdg": False,
+            "useCotCaption": True,
+            "useCotLanguage": True,
+            "useCotMetas": True,
+            "inferMethod": "ode",
+            "lmBackend": "pt",
+            "lmModel": "acestep-5Hz-lm-0.6B"
         }
 
         if bpm is not None:
