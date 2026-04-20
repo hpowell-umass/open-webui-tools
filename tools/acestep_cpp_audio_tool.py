@@ -617,10 +617,10 @@ class Tools:
     ) -> Union[str, Tuple[HTMLResponse, Dict[str, Any]]]:
         """
         Generate a complete song (music + vocals) using ACE Step 1.5 backend.
-        :param prompt: Style, mood, and genre description.
+        :param prompt: Detailed natural language description of style, mood, and genre (e.g., 'A melancholic lofi track with a soft female vocal').
         :param title: Song title for display and file naming.
-        :param lyrics: Optional lyrics to sing.
-        :param tags: Optional music tags (instruments, mood, tempo).
+        :param lyrics: Optional lyrics to sing. Supports structure tags like [Verse], [Chorus: Anthemic], [Outro] to guide arrangement and performance.
+        :param tags: Specific music tags such as genres, instruments, or production styles (e.g., 'lofi, piano, 80s, reverb').
         :param language: Vocal language (en, zh, ja, etc.).
         :param key: Musical key and scale (e.g. C Major).
         :param time_signature: Rhythmic time signature (2, 3, 4, 5, 6).
@@ -661,10 +661,11 @@ class Tools:
         else:
             gen_seed = target_seed
 
+        full_prompt = f"{tags}, {prompt}" if tags else prompt
         payload = {
             "taskType": "text2music",
-            "songDescription": prompt,
-            "style": f"{tags}, {prompt}" if tags else prompt,
+            "songDescription": full_prompt,
+            "style": full_prompt,
             "lyrics": lyrics,
             "instrumental": not bool(lyrics),
             "vocalLanguage": language,
