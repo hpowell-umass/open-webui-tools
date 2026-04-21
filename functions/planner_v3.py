@@ -3,8 +3,8 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.9.0
-required_open_webui_version: 0.8.12
+version: 3.10.0
+required_open_webui_version: 0.9.1
 
 Features:
 - **Autonomous Multi-Agent Orchestration**: Dynamic task decomposition and delegation to specialized subagents.
@@ -89,55 +89,14 @@ from open_webui.env import (
     FORWARD_SESSION_INFO_HEADER_MESSAGE_ID,
 )
 from open_webui.models.models import Models
-from open_webui.models.users import Users
-from open_webui.models.files import Files
 from open_webui.models.chats import Chats
+from open_webui.models.users import Users
 from open_webui.models.skills import Skills
-from open_webui.routers.files import upload_file_handler
-from open_webui.utils.images.comfyui import get_images, comfyui_upload_image
-
+from open_webui.routers.files import upload_file_handler, Files
 
 # --- Globals & Context ---
 logger = logging.getLogger(__name__)
 
-# v3.15: Surgical discovery patch for ComfyUI.
-# Intercepts the client_id and replaces it with a context-local ID if the caller is the planner.
-_is_planner_execution_ctx: ContextVar[Optional[bool]] = ContextVar(
-    "is_planner_execution_ctx", default=None
-)
-
-
-def _apply_comfy_patch():
-    """
-    Surgical, non-invasive discovery patch for ComfyUI.
-    Intercepts the client_id and adds a unique suffix to prevent WebSocket listener hijacking.
-    """
-    try:
-        import open_webui.routers.images as images_router
-
-        for func_name in ["comfyui_create_image", "comfyui_edit_image"]:
-            orig_func = getattr(images_router, func_name, None)
-            if orig_func and not hasattr(orig_func, "_patched"):
-
-                async def patched_func(*args, **kwargs):
-                    # client_id is the 3rd positional argument (model, payload, client_id, ...)
-                    # Suffix only if we are in a planner execution context.
-                    if _is_planner_execution_ctx.get():
-                        new_args = list(args)
-                        if len(new_args) >= 3:
-                            new_args[2] = f"{new_args[2]}_{uuid.uuid4().hex[:8]}"
-                        elif "client_id" in kwargs:
-                            kwargs["client_id"] = (
-                                f"{kwargs['client_id']}_{uuid.uuid4().hex[:8]}"
-                            )
-                        return await orig_func(*new_args, **kwargs)
-                    return await orig_func(*args, **kwargs)
-
-                patched_func._patched = True
-                setattr(images_router, func_name, patched_func)
-        logger.info("[Planner] ComfyUI isolation patch applied successfully.")
-    except Exception as e:
-        logger.debug(f"ComfyUI patch skipped/failed: {e}")
 
 
 @asynccontextmanager
@@ -451,7 +410,8 @@ async def planner_merge_mcp_tools_from_ids(
                 )
                 continue
 
-            if not has_connection_access(user, mcp_server_connection):
+            # v3.15.8+: has_connection_access is now async in 0.9.1
+            if not await has_connection_access(user, mcp_server_connection):
                 logger.warning(
                     "Access denied to MCP server %s for user %s",
                     server_id,
@@ -675,7 +635,8 @@ async def apply_native_completion_file_prep(
         and has_builtin_tools_in_payload
     ):
         # v3.6: Copy messages to avoid mutating the caller's body dict in place
-        body["messages"] = add_file_context(copy.deepcopy(msgs), chat_id, user)
+        # v3.15.8+: add_file_context is now async in 0.9.1
+        body["messages"] = await add_file_context(copy.deepcopy(msgs), chat_id, user)
 
     file_context_enabled = caps.get("file_context", True)
     if not file_context_enabled:
@@ -1974,7 +1935,8 @@ class StatePersistence:
                 logger.info(
                     f"Performing deep history scan for chat {chat_id} via database..."
                 )
-                chat_obj = await asyncio.to_thread(Chats.get_chat_by_id, chat_id)
+                # v3.15.8+: Chats.get_chat_by_id is now async in 0.9.1
+                chat_obj = await Chats.get_chat_by_id(chat_id)
                 if chat_obj and hasattr(chat_obj, "chat"):
                     messages_map = chat_obj.chat.get("history", {}).get("messages", {})
                     current_id = chat_obj.chat.get("history", {}).get("currentId")
@@ -2033,7 +1995,8 @@ class StatePersistence:
                 )
                 return
 
-            file_obj = await asyncio.to_thread(Files.get_file_by_id, file_id)
+            # v3.15.8+: Files.get_file_by_id is now async in 0.9.1
+            file_obj = await Files.get_file_by_id(file_id)
             if not file_obj:
                 logger.warning(f"State file with ID {file_id} not found in database.")
                 return
@@ -2179,8 +2142,8 @@ class StatePersistence:
                     if target_chat_id and target_msg_id:
                         try:
                             # Direct DB update
-                            await asyncio.to_thread(
-                                Chats.add_message_files_by_id_and_message_id,
+                            # v3.15.8+: Chats.add_message_files_by_id_and_message_id is now async in 0.9.1
+                            await Chats.add_message_files_by_id_and_message_id(
                                 target_chat_id,
                                 target_msg_id,
                                 [file_info],
@@ -2207,8 +2170,9 @@ class StatePersistence:
 class MCPHub:
     """Manages MCP client lifecycle, connection deduplication, and cleanup."""
 
-    def __init__(self, valves: Any):
-        self.valves = valves
+    def __init__(self, context: PlannerContext):
+        self.context = context
+        self.valves = context.valves
         self.mcp_clients: dict[str, dict[str, Any]] = {}
         self._mcp_lock: asyncio.Lock = asyncio.Lock()
         self._connecting_mcp: dict[str, asyncio.Future] = {}
@@ -2234,6 +2198,7 @@ class MCPHub:
                         client = StreamableHTTPMCPClient(
                             url,
                             headers,
+                            context=self.context,
                             timeout=int(self.valves.SUBAGENT_TIMEOUT),
                         )
                         await client.connect()
@@ -2277,9 +2242,10 @@ class PlannerMCPClient:
     Transparent to all other OWUI operations.
     """
 
-    def __init__(self):
+    def __init__(self, context: PlannerContext):
         self._client = MCPClient()
         self._call_lock = asyncio.Lock()
+        self.context = context
 
     async def connect(self, url: str, headers: Optional[dict] = None) -> None:
         """
@@ -2300,26 +2266,6 @@ class PlannerMCPClient:
         return await self._client.list_tool_specs()
 
     async def call_tool(self, name: str, function_args: Optional[dict] = None) -> Any:
-        # v3.15.7: Tool redirection for ComfyUI Parallel execution
-        if name == "generate_image":
-            # Check if this is a ComfyUI generation
-            engine = self.valves.IMAGE_GEN_ENGINE
-            if engine == "comfyui":
-                # We use the isolated metadata already provided by subagent_agent / image_gen_agent
-                # but we call our dedicated parallel driver to prevent loop deadlocks.
-                from open_webui.utils.images.comfyui import ComfyUIWorkflow
-
-                class FakePayload:
-                    def __init__(self, args):
-                        self.workflow = ComfyUIWorkflow(
-                            **json.loads(args.get("workflow", "{}"))
-                        )
-
-                payload = FakePayload(function_args or {})
-                return await ComfyUIParallelExecutor.generate_image(
-                    self.wide_metadata, payload
-                )
-
         return await self._client.call_tool(name, function_args=function_args or {})
 
     async def disconnect(self) -> None:
@@ -2358,13 +2304,8 @@ async def _comfyui_isolation_block(metadata: dict, base_client_id: str):
     scoped_metadata["__client_id__"] = unique_id
     scoped_metadata["session_id"] = unique_id
 
-    # v3.15: Activate the context variable for the monkeypatch to trigger
-    token = _is_planner_execution_ctx.set(True)
-    try:
-        # 5. Yield the isolated copy for the duration of the tool call
-        yield scoped_metadata
-    finally:
-        _is_planner_execution_ctx.reset(token)
+    # 5. Yield the isolated copy for the duration of the tool call
+    yield scoped_metadata
 
 
 class StreamableHTTPMCPClient:
@@ -2373,16 +2314,19 @@ class StreamableHTTPMCPClient:
     Each call is an independent cancellable task — no worker queue.
     """
 
-    def __init__(self, url: str, headers: Optional[dict], timeout: int = 120):
+    def __init__(
+        self, url: str, headers: Optional[dict], context: PlannerContext, timeout: int = 120
+    ):
         self.url = url
         self.headers = headers or {}
         self.timeout = timeout
+        self.context = context
         self._client: Optional[PlannerMCPClient] = None
         self._call_lock = asyncio.Lock()  # kept for ToolRegistry compatibility
 
     async def connect(self):
         async with asyncio.timeout(60.0):
-            self._client = PlannerMCPClient()
+            self._client = PlannerMCPClient(context=self.context)
             await self._client.connect(url=self.url, headers=self.headers)
 
     async def list_tool_specs(self) -> list[dict]:
@@ -2435,143 +2379,6 @@ class StreamableHTTPMCPClient:
 
 
 # ---------------------------------------------------------------------------
-# Tool Management
-# ---------------------------------------------------------------------------
-
-
-class ComfyUIParallelExecutor:
-    """
-    Parallel-safe driver for ComfyUI that moves blocking WebSocket connections
-    and polling into dedicated worker threads to avoid stalling the event loop.
-    """
-
-    @staticmethod
-    async def generate_image(
-        model: str,
-        form_data: Any,
-        user_id: str,
-        metadata: dict,
-        request: Request,
-    ) -> list[dict]:
-        import open_webui.utils.images.comfyui as comfyui_module
-        from open_webui.routers.images import get_image_data, upload_image
-
-        client_id = metadata.get("client_id", user_id)
-        base_url = request.app.state.config.COMFYUI_BASE_URL
-        api_key = request.app.state.config.COMFYUI_API_KEY
-
-        # Ensure the workflow is a dict
-        workflow = json.loads(form_data.workflow.workflow)
-
-        # 1. Prepare the nested workflow payload identical to how comfyui_create_image does it
-        # (We skip the high-level comfyui_create_image because it has blocking calls in its async body)
-        for node in form_data.workflow.nodes:
-            if node.type:
-                if node.type == "model":
-                    for node_id in node.node_ids:
-                        workflow[node_id]["inputs"][node.key] = model
-                elif node.type == "prompt":
-                    for node_id in node.node_ids:
-                        workflow[node_id]["inputs"][
-                            node.key if node.key else "text"
-                        ] = form_data.prompt
-                elif node.type == "negative_prompt":
-                    for node_id in node.node_ids:
-                        workflow[node_id]["inputs"][
-                            node.key if node.key else "text"
-                        ] = form_data.negative_prompt
-                elif node.type == "width":
-                    for node_id in node.node_ids:
-                        workflow[node_id]["inputs"][
-                            node.key if node.key else "width"
-                        ] = form_data.width
-                elif node.type == "height":
-                    for node_id in node.node_ids:
-                        workflow[node_id]["inputs"][
-                            node.key if node.key else "height"
-                        ] = form_data.height
-                elif node.type == "n":
-                    for node_id in node.node_ids:
-                        workflow[node_id]["inputs"][
-                            node.key if node.key else "batch_size"
-                        ] = form_data.n
-                elif node.type == "steps":
-                    for node_id in node.node_ids:
-                        workflow[node_id]["inputs"][
-                            node.key if node.key else "steps"
-                        ] = form_data.steps
-                elif node.type == "seed":
-                    seed = (
-                        form_data.seed
-                        if form_data.seed
-                        else random.randint(0, 1125899906842624)
-                    )
-                    for node_id in node.node_ids:
-                        workflow[node_id]["inputs"][node.key] = seed
-            else:
-                for node_id in node.node_ids:
-                    workflow[node_id]["inputs"][node.key] = node.value
-
-        # 2. Define the synchronous worker that handles the blocking WebSocket
-        def _threaded_worker():
-            import websocket
-
-            ws = websocket.WebSocket()
-            try:
-                headers = {"Authorization": f"Bearer {api_key}"}
-                ws_url = base_url.replace("http://", "ws://").replace(
-                    "https://", "wss://"
-                )
-
-                # BLOCKING connection happens here - moved to thread!
-                ws.connect(f"{ws_url}/ws?clientId={client_id}", header=headers)
-
-                # BLOCKING polling happens here - moved to thread!
-                return comfyui_module.get_images(
-                    ws, workflow, client_id, base_url, api_key
-                )
-            finally:
-                try:
-                    ws.close()
-                except:
-                    pass
-
-        # 3. Execute the worker in a thread to keep the event loop responsive
-        try:
-            logging.info(
-                f"ComfyUI Parallel Driver: Dispatching generation for client {client_id}"
-            )
-            res = await asyncio.to_thread(_threaded_worker)
-        except Exception as e:
-            logging.exception(f"ComfyUI Parallel Driver: Error in worker thread: {e}")
-            return []
-
-        if not res or "data" not in res:
-            return []
-
-        # 4. Upload results back to Open WebUI (uses existing persistence logic)
-        from open_webui.models.users import Users
-
-        user = Users.get_user_by_id(user_id)
-
-        images = []
-        for image in res["data"]:
-            headers = None
-            if api_key:
-                headers = {"Authorization": f"Bearer {api_key}"}
-
-            image_data, content_type = get_image_data(image["url"], headers)
-            _, url = upload_image(
-                request,
-                image_data,
-                content_type,
-                {**form_data.model_dump(exclude_none=True), **metadata},
-                user,
-            )
-            images.append({"url": url})
-
-        return images
-
 
 class ToolRegistry:
 
@@ -2591,46 +2398,6 @@ class ToolRegistry:
         self.subagent_tools_cache = {}
         self.user_skills = context.metadata.get("__user_skills__", {})
         self._resolution_lock = asyncio.Lock()
-
-    def _wrap_comfy_tools(self, tools_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        Specialized interception for ComfyUI tool sets.
-        Redirects generate_image to the ComfyUIParallelExecutor.
-        """
-        if not tools_dict:
-            return tools_dict
-
-        # Detect image generation engine
-        config = self.request.app.state.config
-        if config.IMAGE_GENERATION_ENGINE != "comfyui":
-            return tools_dict
-
-        for tool_id, tool_info in tools_dict.items():
-            # Check if this is the built-in image tool
-            if tool_id == "generate_image":
-                original_callable = tool_info.get("callable")
-
-                async def wrapped_gen(model=None, **kwargs):
-                    # v3.15: Isolated client_id from tool call metadata
-                    metadata = kwargs.get("__metadata__", self.pipe_metadata)
-                    form_data = kwargs.get("__form_data__")
-
-                    # 1. Capture the pydantic model needed for ComfyUI driver
-                    # If called from builtin tool directly, it is usually already parsed.
-                    if form_data:
-                        return await ComfyUIParallelExecutor.generate_image(
-                            model, form_data, self.user.id, metadata, self.request
-                        )
-
-                    # 2. Fallback to original if we can't safely intercept the form
-                    return await original_callable(model=model, **kwargs)
-
-                tool_info["callable"] = wrapped_gen
-                logger.info(
-                    f"ToolRegistry: Intercepted {tool_id} for Parallel ComfyUI Driver."
-                )
-
-        return tools_dict
 
     async def _resolve_model_skills(
         self, model_info: Any, extra_params: dict
@@ -2888,7 +2655,7 @@ class ToolRegistry:
         # This list can be used for extra subagent-level common utilities if needed.
         return []
 
-    def get_filtered_builtin_tools(
+    async def get_filtered_builtin_tools(
         self,
         extra_params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -2950,13 +2717,12 @@ class ToolRegistry:
                 "channels": False,
             }
 
-            return self._wrap_comfy_tools(
-                get_builtin_tools(
-                    self.request,
-                    extra_params,
-                    features=active_features,
-                    model=m_info,
-                )
+            # v3.15.8+: get_builtin_tools is now async in 0.9.1
+            return await get_builtin_tools(
+                self.request,
+                extra_params,
+                features=active_features,
+                model=m_info,
             )
         except Exception as e:
             logger.error(f"Failed to load filtered built-in tools: {e}")
@@ -3046,9 +2812,7 @@ class ToolRegistry:
 
         tools_dict: dict[str, Any] = {}
         if ordered_tool_ids:
-            tools_dict = self._wrap_comfy_tools(
-                await get_tools(self.request, ordered_tool_ids, self.user, extra_params)
-            )
+            tools_dict = await get_tools(self.request, ordered_tool_ids, self.user, extra_params)
         app_models = getattr(self.request.app.state, "MODELS", {})
         model_ws = merge_workspace_model_dict(
             app_models, self.context.body.get("model", "") or ""
@@ -3080,7 +2844,7 @@ class ToolRegistry:
             # For now, we set __skill_ids__ so view_skill is available.
             extra_params["__skill_ids__"] = skill_ids
 
-        builtin_tools = self.get_filtered_builtin_tools(extra_params)
+        builtin_tools = await self.get_filtered_builtin_tools(extra_params)
         if builtin_tools:
             tools_dict.update(builtin_tools)
 
@@ -3202,7 +2966,8 @@ class ToolRegistry:
 
                         try:
                             # Use features from va config and the merged model
-                            s_tools_dict = get_builtin_tools(
+                            # v3.15.8+: get_builtin_tools is now async in 0.9.1
+                            s_tools_dict = await get_builtin_tools(
                                 self.request,
                                 extra_params,
                                 features=va.features,
@@ -3282,11 +3047,9 @@ class ToolRegistry:
                 s_tools_dict: dict[str, Any] = {}
                 if ordered_sub_ids:
                     try:
-                        assigned_tools = self._wrap_comfy_tools(
-                            await get_tools(
+                        assigned_tools = await get_tools(
                                 self.request, ordered_sub_ids, self.user, extra_params
                             )
-                        )
                         if assigned_tools:
                             s_tools_dict.update(assigned_tools)
                     except Exception as e:
@@ -3374,7 +3137,8 @@ class ToolRegistry:
 
                 if function_calling == "native" and builtin_tools_enabled:
                     try:
-                        builtin_tools = get_builtin_tools(
+                        # v3.15.8+: get_builtin_tools is now async in 0.9.1
+                        builtin_tools = await get_builtin_tools(
                             self.request,
                             extra_params,
                             features=features_ws,
@@ -4728,7 +4492,8 @@ class SubagentManager:
                 # 4. Process tool result
                 # v3.15: CRITICAL. Use the FULL scoped_meta so that polling
                 # handles the spoofed IDs while filing handles the real IDs.
-                tc_return = process_tool_result(
+                # v3.15.8+: process_tool_result is now async in 0.9.1
+                tc_return = await process_tool_result(
                     self.context.request,
                     name,
                     res,
@@ -5187,7 +4952,7 @@ class PlannerEngine:
         self.model_knowledge = context.model_knowledge
 
         self.state_persistence = StatePersistence(context, state, ui)
-        self.mcp_hub = MCPHub(context.valves)
+        self.mcp_hub = MCPHub(context=self.context)
         self.tools = InternalToolExecutor(context, self)
         self.current_plan_html = ""
         self.total_emitted = ""  # Trace current Turn body only
@@ -5273,9 +5038,8 @@ class PlannerEngine:
                 return
 
             try:
-                # Idempotency check: read current DB state before writing
-                current_message = await asyncio.to_thread(
-                    Chats.get_message_by_id_and_message_id,
+                # v3.15.8+: Chats.get_message_by_id_and_message_id is now async in 0.9.1
+                current_message = await Chats.get_message_by_id_and_message_id(
                     chat_id,
                     message_id,
                 )
@@ -5301,9 +5065,8 @@ class PlannerEngine:
                         f"{len(missing)} files missing from DB. Writing..."
                     )
 
-                # Write only the files that are actually missing
-                await asyncio.to_thread(
-                    Chats.add_message_files_by_id_and_message_id,
+                # v3.15.8+: Chats.add_message_files_by_id_and_message_id is now async in 0.9.1
+                await Chats.add_message_files_by_id_and_message_id(
                     chat_id,
                     message_id,
                     expected_files,  # add_message_files is idempotent by file ID
@@ -5398,8 +5161,8 @@ class PlannerEngine:
                                 sync_files.append({"id": f})
 
                         if sync_files:
-                            await asyncio.to_thread(
-                                Chats.add_message_files_by_id_and_message_id,
+                            # v3.15.8+: Chats.add_message_files_by_id_and_message_id is now async in 0.9.1
+                            await Chats.add_message_files_by_id_and_message_id(
                                 target_chat_id,
                                 target_msg_id,
                                 sync_files,
@@ -5437,8 +5200,8 @@ class PlannerEngine:
         # 3. Pull latest from DB as the ultimate source of truth
         if target_chat_id and target_msg_id:
             try:
-                full_message = await asyncio.to_thread(
-                    Chats.get_message_by_id_and_message_id,
+                # v3.15.8+: Chats.get_message_by_id_and_message_id is now async in 0.9.1
+                full_message = await Chats.get_message_by_id_and_message_id(
                     target_chat_id,
                     target_msg_id,
                 )
@@ -5543,7 +5306,12 @@ class PlannerEngine:
             skill_prompt=skill_prompt,
             terminal_sys=terminal_sys,
         )
-        messages = [{"role": "system", "content": plan_sys}] + distilled_history
+        # v3.15.8+: Consolidate system messages for Jinja 0.9.1 compliance.
+        # Strip internal system messages from distilled_history and merge plan_sys at index 0.
+        messages = [
+            {"role": "system", "content": plan_sys},
+            *[m for m in distilled_history if m.get("role") != "system"],
+        ]
 
         json_retries = 0
         max_json_retries = 1
@@ -5763,23 +5531,27 @@ class PlannerEngine:
             skill_prompt=skill_prompt,
             terminal_sys=terminal_sys,
         )
-        exec_history = [{"role": "system", "content": exec_sys}] + distilled_history
+
+        # v3.15.8+: Ensure system prompt is at index 0 for Jinja 0.9.1 compliance.
+        # Merge all system instructions into a single block.
+        exec_history = [{"role": "system", "content": exec_sys}]
+
         tasks_serializable = {
             tid: t.model_dump(mode="json") if hasattr(t, "model_dump") else t.dict()
             for tid, t in self.state.tasks.items()
         }
+
         # Use more explicit formatting similar to v3 for the established plan
         if user_valves.PLAN_MODE:
-            exec_history.append(
-                {
-                    "role": "system",
-                    "content": f"Here is the established plan. Do not deviate from it. Execute the steps logically:\n{json.dumps(tasks_serializable)}",
-                }
-            )
+            exec_history[0]["content"] += f"\n\nHere is the established plan. Do not deviate from it. Execute the steps logically:\n{json.dumps(tasks_serializable)}"
             await self.ui.emit_status(
                 f"Starting execution for {len(self.state.tasks)} tasks..."
             )
             yield ""  # Heartbeat
+
+        # v3.15.8+: Ensure system prompt is at index 0 for Jinja 0.9.1 compliance.
+        # Strip internal system messages from distilled_history after consolidation.
+        exec_history.extend([m for m in distilled_history if m.get("role") != "system"])
 
         external_tools_dict = await self.registry.get_planner_tools_dict()
 
@@ -6273,27 +6045,35 @@ class PlannerEngine:
         else:
             # Sequential execution (original behavior)
             for tc in sorted_tcs:
-                call_id = tc.get("id")
-                done_tag, _, _ = await self._execute_single_tool_call(
-                    tc,
-                    exec_history,
-                    external_tools_dict,
-                    chat_id,
-                    valves,
-                    user_valves,
-                    user_obj,
-                    body,
-                    tc_tag_map,
-                    None,  # No shared state for sequential
-                    history_lock,
-                )
+                try:
+                    call_id = tc.get("id")
+                    done_tag, _, _ = await self._execute_single_tool_call(
+                        tc,
+                        exec_history,
+                        external_tools_dict,
+                        chat_id,
+                        valves,
+                        user_valves,
+                        user_obj,
+                        body,
+                        tc_tag_map,
+                        None,  # No shared state for sequential
+                        history_lock,
+                    )
 
-                # Sibling update in sequential mode
-                total_emitted = total_emitted.replace(tc_tag_map[call_id], done_tag)
-                tc_tag_map[call_id] = done_tag
-                self.total_emitted = total_emitted
-                await self._emit_replace(total_emitted)
-                yield ""  # Heartbeat
+                    # Sibling update in sequential mode
+                    total_emitted = total_emitted.replace(tc_tag_map[call_id], done_tag)
+                    tc_tag_map[call_id] = done_tag
+                    self.total_emitted = total_emitted
+                    await self._emit_replace(total_emitted)
+                    yield ""  # Heartbeat
+
+                except GeneratorExit:
+                    # v3.15.8+: Catch and re-raise GeneratorExit
+                    raise
+                except Exception as e:
+                    logger.error(f"Error in sequential tool execution: {e}")
+                    continue
 
         # Clear the consolidation flag after the tool batch completes
         self.metadata.pop("__consolidated__", None)
@@ -6421,7 +6201,8 @@ class PlannerEngine:
                         # 4. Process tool result
                         # v3.15: CRITICAL. Use the FULL scoped_meta so that polling
                         # handles the spoofed IDs while filing handles the real IDs.
-                        tc_return = process_tool_result(
+                        # v3.15.8+: process_tool_result is now async in 0.9.1
+                        tc_return = await process_tool_result(
                             self.context.request,
                             name,
                             res,
@@ -6459,9 +6240,8 @@ class PlannerEngine:
                             # v3.9.0: Thread-safe lock for parallel planner tools
                             async with self._files_lock:
                                 try:
-                                    # Synchronize with DB for multi-turn persistence using thread wrapper
-                                    await asyncio.to_thread(
-                                        Chats.add_message_files_by_id_and_message_id,
+                                    # v3.15.8+: Chats.add_message_files_by_id_and_message_id is now async in 0.9.1
+                                    await Chats.add_message_files_by_id_and_message_id(
                                         target_chat_id,
                                         target_msg_id,
                                         tc_files,
@@ -6617,21 +6397,28 @@ class PlannerEngine:
                 f"Respond with a JSON object following the schema exactly."
             )
 
-            # v3.6.8: Use a copy to avoid mutating the core execution history in place
-            # and prevent 'assistant' -> 'assistant' invariant violations if retrying.
+            # v3.15.8+: Consolidate system messages for Jinja 0.9.1 compliance.
+            # Merge judge instructions into the primary system block.
             msgs = copy.deepcopy(exec_history)
+            if msgs and msgs[0].get("role") == "system":
+                msgs[0]["content"] += f"\n\n{judge_msg}"
+            else:
+                msgs.insert(0, {"role": "system", "content": judge_msg})
+
             if not msgs or msgs[-1].get("role") != "assistant":
                 msgs.append({"role": "assistant", "content": content})
             else:
-                # If the last message is already assistant, update the copy's content
                 if msgs[-1].get("content") != content:
                     msgs[-1]["content"] = content
+
+            # Strip any secondary system messages to avoid Jinja "System message must be at the beginning"
+            msgs = [msgs[0]] + [m for m in msgs[1:] if m.get("role") != "system"]
 
             # v3.6.8: Use msgs for the judge call
             judge_body = {
                 **body,
                 "model": valves.REVIEW_MODEL or valves.PLANNER_MODEL,
-                "messages": msgs + [{"role": "user", "content": judge_msg}],
+                "messages": msgs,
                 "response_format": {
                     "type": "json_schema",
                     "json_schema": {
@@ -6923,8 +6710,6 @@ Your goal is to fulfill the user's request.""",
         self.type = "manifold"
         self.valves = self.Valves()
         self.user_valves = self.UserValves()
-        # Initialize ComfyUI isolation patch on first instantiation
-        _apply_comfy_patch()
 
     def pipes(self) -> list[dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
@@ -6995,8 +6780,8 @@ Your goal is to fulfill the user's request.""",
         # Fetch skills once here to avoid redundant synchronous DB hits in the loop.
         user_id = __user__.get("id")
         user_obj, user_skills = await asyncio.gather(
-            asyncio.to_thread(Users.get_user_by_id, user_id),
-            asyncio.to_thread(Skills.get_skills_by_user_id, user_id, "read"),
+            Users.get_user_by_id(user_id),
+            Skills.get_skills_by_user_id(user_id, "read"),
         )
         accessible_skills = {s.id: s for s in user_skills if s.is_active}
 
@@ -7091,6 +6876,9 @@ Your goal is to fulfill the user's request.""",
                 chat_id, self.valves, self.user_valves, body, __files__
             ):
                 yield delta
+        except GeneratorExit:
+            # v3.15.8+: Catch and re-raise GeneratorExit to ensure standard generator closure.
+            raise
         finally:
             # Lifecycle cleanup: Ensure all subagents and MCP connections are terminated
             # when the pipe generator is stopped/cancelled.
