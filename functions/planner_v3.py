@@ -3035,7 +3035,14 @@ class ToolRegistry:
                         or params.get("tools")
                         or []
                     )
-                    model_system_message = params.get("system", "") or ""
+                # v3.15.10: Broaden system prompt extraction for workspace agents (check all common OWUI paths)
+                model_system_message = (
+                    params.get("system")
+                    or info.get("system")
+                    or meta.get("system")
+                    or model_ws.get("system")
+                    or ""
+                )
 
                 seen_sub: set[str] = set()
                 ordered_sub_ids: list[str] = []
@@ -3224,9 +3231,12 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
         messages: list = None,
         skill_prompt: str = "",
         terminal_sys: str = "",
+        base_sys: str = "",
     ) -> str:
         """Construct the full system prompt with tools and mandatory rules dynamically."""
         full_prompt = valves.SYSTEM_PROMPT
+        if base_sys:
+            full_prompt = f"{base_sys}\n\n{full_prompt}"
         if skill_prompt:
             full_prompt = f"{full_prompt}\n\n{skill_prompt}"
         if terminal_sys:
@@ -5305,6 +5315,7 @@ class PlannerEngine:
             messages=distilled_history,
             skill_prompt=skill_prompt,
             terminal_sys=terminal_sys,
+            base_sys="",
         )
         # v3.15.8+: Consolidate system messages for Jinja 0.9.1 compliance.
         # Strip internal system messages from distilled_history and merge plan_sys at index 0.
@@ -5530,6 +5541,10 @@ class PlannerEngine:
             messages=distilled_history,
             skill_prompt=skill_prompt,
             terminal_sys=terminal_sys,
+            base_sys=next(
+                (m["content"] for m in self.context.body.get("messages", []) if m.get("role") == "system"),
+                ""
+            ),
         )
 
         # v3.15.8+: Ensure system prompt is at index 0 for Jinja 0.9.1 compliance.
