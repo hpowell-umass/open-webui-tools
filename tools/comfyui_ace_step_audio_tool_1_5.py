@@ -6,7 +6,7 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.0
+version: 0.6.0
 """
 
 import json
@@ -205,7 +205,7 @@ async def download_audio_to_storage(
     try:
         file_extension = os.path.splitext(filename)[1] or ".mp3"
         if song_name:
-            safe_name = re.sub(r"[^\w\s-]", "", song_name).strip().replace(" ", "_")
+            safe_name = re.sub(r"[^\w\s-]", "", song_name).strip()
             local_filename = f"{safe_name}{file_extension}"
         else:
             local_filename = f"ace_step_{uuid.uuid4().hex[:8]}{file_extension}"
@@ -234,7 +234,7 @@ async def download_audio_to_storage(
                         headers={"content-type": content_type},
                     )
 
-                    file_item = upload_file_handler(
+                    file_item = await upload_file_handler(
                         request,
                         file=upload_file,
                         metadata={},
@@ -304,6 +304,75 @@ async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bo
         return False
 
 
+async def get_llamacpp_models_async(
+    api_url: str = "http://localhost:8082",
+) -> list[Dict[str, Any]]:
+    """Fetch all models currently known to the llama-server router via GET /v1/models."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{api_url.rstrip('/')}/v1/models") as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return cast(list[Dict[str, Any]], data.get("data", []))
+    except Exception as e:
+        print(f"Error fetching llama.cpp models: {e}")
+        return []
+
+
+async def unload_all_llamacpp_models_async(
+    api_url: str = "http://localhost:8082",
+) -> bool:
+    """
+    Unload all models loaded in a llama-server router instance.
+
+    Uses GET /v1/models to list models, then POST /models/unload for each one
+    that is currently loaded (in_cache == True or no in_cache field present).
+    """
+    try:
+        models = await get_llamacpp_models_async(api_url)
+        if not models:
+            print("No llama.cpp models found or server unreachable.")
+            return True
+
+        base_url = api_url.rstrip("/")
+        unloaded_any = False
+
+        async with aiohttp.ClientSession() as session:
+            for model in models:
+                model_id = model.get("id", "")
+                # in_cache is present in router mode; if absent we still attempt unload
+                in_cache = model.get("in_cache", True)
+                if not model_id or not in_cache:
+                    continue
+
+                print(f"Unloading llama.cpp model: {model_id}")
+                try:
+                    async with session.post(
+                        f"{base_url}/models/unload",
+                        json={"model": model_id},
+                        headers={"Content-Type": "application/json"},
+                    ) as resp:
+                        if resp.status in (200, 204):
+                            unloaded_any = True
+                        else:
+                            body = await resp.text()
+                            print(
+                                f"Warning: /models/unload returned {resp.status} for '{model_id}': {body}"
+                            )
+                except Exception as e:
+                    print(f"Warning: failed to unload '{model_id}': {e}")
+
+        if not unloaded_any:
+            print("No llama.cpp models were unloaded (none in cache?).")
+
+        return True
+
+    except Exception as e:
+        print(f"Error unloading llama.cpp models: {e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # PALETTE — generate 5 vivid rainbow colors from a random seed.
 # Hues are spaced evenly around the wheel (72° apart) from a random start.
@@ -350,17 +419,23 @@ def generate_audio_player_embed(
     tags: str,
     lyrics: Optional[str] = None,
     palette_seed: Optional[int] = None,
+    colorful: bool = True,
 ) -> str:
     """
-    Generate a vivid rainbow-gradient audio player embed.
-    Each generation creates a unique 5-color palette from a random hue start.
+    Generate an audio player embed.
+    When *colorful* is True, uses a vivid rainbow-gradient style.
+    When False, uses a minimalistic grey card style.
     Tags are collapsed by default; lyrics are the main focus.
     Pure vanilla HTML/CSS/JS — no external dependencies.
     """
     if palette_seed is None:
         palette_seed = random.randint(0, 9999999)
 
-    c0, c1, c2, c3, c4 = _random_rainbow_palette(palette_seed)
+    if colorful:
+        c0, c1, c2, c3, c4 = _random_rainbow_palette(palette_seed)
+    else:
+        # Minimalistic grey palette
+        c0 = c1 = c2 = c3 = c4 = "#3a3a3e"
 
     def _esc(s: str) -> str:
         return (
@@ -398,16 +473,9 @@ def generate_audio_player_embed(
         for i in range(24)
     )
 
-    html = f"""
-<div style="display:flex;justify-content:center;width:100%;
-  font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
-
-<div style="position:relative;overflow:hidden;border-radius:22px;
-  max-width:420px;width:100%;
-  box-shadow:0 24px 64px rgba(0,0,0,0.45),0 0 0 1px rgba(255,255,255,0.1);
-  color:#fff;box-sizing:border-box;margin-bottom:18px;">
-
-  <!-- ── Animated rainbow gradient background ── -->
+    # Build background layers based on colorful flag
+    if colorful:
+        bg_layer = f"""  <!-- ── Animated rainbow gradient background ── -->
   <div style="position:absolute;inset:0;z-index:0;
     background:linear-gradient(125deg,{c0},{c1},{c2},{c3},{c4},{c0});
     background-size:500% 500%;
@@ -424,7 +492,22 @@ def generate_audio_player_embed(
   <div style="position:absolute;z-index:1;width:160px;height:160px;border-radius:50%;
     background:radial-gradient(circle,rgba(255,255,255,0.10) 0%,transparent 68%);
     bottom:-40px;left:-30px;
-    animation:orb_{pid} 11s ease-in-out infinite reverse;pointer-events:none;"></div>
+    animation:orb_{pid} 11s ease-in-out infinite reverse;pointer-events:none;"></div>"""
+    else:
+        bg_layer = """  <!-- ── Transparent backdrop ── -->
+  <div style="position:absolute;inset:0;z-index:0;background:rgba(0,0,0,0.12);
+    backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);"></div>"""
+
+    html = f"""
+<div style="display:flex;justify-content:center;width:100%;
+  font-family:system-ui,-apple-system,'Segoe UI',sans-serif;">
+
+<div style="position:relative;overflow:hidden;border-radius:22px;
+  max-width:420px;width:100%;
+  box-shadow:{"0 24px 64px rgba(0,0,0,0.45),0 0 0 1px rgba(255,255,255,0.1)" if colorful else "0 4px 24px rgba(0,0,0,0.18),0 0 0 1px rgba(255,255,255,0.06)"};
+  color:#fff;box-sizing:border-box;margin-bottom:18px;">
+
+{bg_layer}
 
   <!-- ── CONTENT ── -->
   <div style="position:relative;z-index:2;padding:24px 22px 22px;">
@@ -489,7 +572,7 @@ def generate_audio_player_embed(
         display:flex;align-items:center;justify-content:center;
         transition:transform .14s,box-shadow .14s;outline:none;flex-shrink:0;">
         <svg id="pi_{pid}" viewBox="0 0 24 24"
-          style="width:26px;height:26px;pointer-events:none;fill:{c0};margin-left:3px;">
+          style="width:26px;height:26px;pointer-events:none;fill:{c0 if colorful else "#888"};margin-left:3px;">
           <path d="M8 5.14v13.72a1.14 1.14 0 0 0 1.76.99l10.86-6.86a1.14 1.14 0 0 0 0-1.98L9.76 4.15A1.14 1.14 0 0 0 8 5.14z"/>
         </svg>
       </button>
@@ -564,20 +647,13 @@ def generate_audio_player_embed(
 </div>
 
 <style>
-  @keyframes mesh_{pid} {{
-    0%   {{ background-position:0% 50%; }}
-    50%  {{ background-position:100% 50%; }}
-    100% {{ background-position:0% 50%; }}
-  }}
-  @keyframes orb_{pid} {{
-    0%,100% {{ transform:translateY(0) scale(1); }}
-    50%     {{ transform:translateY(-18px) scale(1.07); }}
-  }}
+  {"@keyframes mesh_" + pid + " { 0% { background-position:0% 50%; } 50% { background-position:100% 50%; } 100% { background-position:0% 50%; } }" if colorful else ""}
+  {"@keyframes orb_" + pid + " { 0%,100% { transform:translateY(0) scale(1); } 50% { transform:translateY(-18px) scale(1.07); } }" if colorful else ""}
   @keyframes bb_{pid} {{
     from {{ height:3px;  opacity:0.45; }}
     to   {{ height:24px; opacity:1; }}
   }}
-  #pb_{pid}:hover  {{ transform:scale(1.07) !important; box-shadow:0 0 38px rgba(255,255,255,0.7),0 8px 24px rgba(0,0,0,0.3) !important; }}
+  #pb_{pid}:hover  {{ transform:scale(1.07) !important; box-shadow:0 0 38px rgba(255,255,255,{"0.7" if colorful else "0.3"}),0 8px 24px rgba(0,0,0,0.3) !important; }}
   #pb_{pid}:active {{ transform:scale(0.95) !important; }}
   #vbtn_{pid}:hover, #dl_{pid}:hover {{ background:rgba(255,255,255,0.34) !important; }}
   .vbtn_{pid}:hover {{ background:rgba(255,255,255,0.34) !important; }}
@@ -595,6 +671,7 @@ def generate_audio_player_embed(
   var curIdx  = 0;
   var c0      = "{c0}";
   var styleOpen = false;
+  var currentBlobUrl = null;
 
   var aud    = document.getElementById('aud_{pid}');
   var pb     = document.getElementById('pb_{pid}');
@@ -610,6 +687,40 @@ def generate_audio_player_embed(
   var vfill  = document.getElementById('vfill_{pid}');
   var ww     = document.getElementById('ww_{pid}');
   var vBtns  = document.querySelectorAll('.vbtn_{pid}');
+
+  // ── Authenticated fetch helper ──
+  // Reads JWT from localStorage at call-time (same as OWUI's own frontend).
+  // Token is only used in the Authorization header — never in URLs, HTML, or logs.
+  // credentials:'include' sends the session cookie as fallback for cookie-auth setups.
+  function authFetch(url) {{
+    var opts = {{ credentials: 'include' }};
+    try {{
+      var token = localStorage.getItem('token');
+      if (token) {{
+        opts.headers = {{ 'Authorization': 'Bearer ' + token }};
+      }}
+    }} catch(e) {{ /* localStorage blocked — cookie fallback only */ }}
+    return fetch(url, opts);
+  }}
+
+  // Fetch audio as a blob URL for playback (bypasses <audio> auth limitation).
+  // Falls back to direct URL on failure (backward compat with older OWUI).
+  function fetchBlobUrl(url, callback) {{
+    // External URLs (e.g. direct ComfyUI links) don't need auth
+    if (url.indexOf('/api/') === -1) {{
+      callback(url);
+      return;
+    }}
+    authFetch(url).then(function(resp) {{
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.blob();
+    }}).then(function(blob) {{
+      callback(URL.createObjectURL(blob));
+    }}).catch(function() {{
+      // Fallback: try direct URL (works on older OWUI without strict auth)
+      callback(url);
+    }});
+  }}
 
   // Style toggle
   var styleHdr  = document.getElementById('styleHdr_{pid}');
@@ -647,9 +758,11 @@ def generate_audio_player_embed(
 
   function loadTrack(idx) {{
     var t = tracks[idx];
-    aud.src = t.url;
-    dl.href = t.url;
-    dl.download = t.title + '.mp3';
+    // Revoke previous blob URL to prevent memory leaks
+    if (currentBlobUrl) {{
+      URL.revokeObjectURL(currentBlobUrl);
+      currentBlobUrl = null;
+    }}
     pi.innerHTML = PLAY;
     pi.style.marginLeft = '3px';
     setProgress(0);
@@ -659,6 +772,11 @@ def generate_audio_player_embed(
       var a = parseInt(b.dataset.idx) === idx;
       b.style.background = a ? 'rgba(255,255,255,0.88)' : 'rgba(255,255,255,0.18)';
       b.style.color      = a ? c0 : '#fff';
+    }});
+    // Fetch audio with auth and set as blob URL
+    fetchBlobUrl(t.url, function(blobUrl) {{
+      currentBlobUrl = blobUrl;
+      aud.src = blobUrl;
     }});
   }}
 
@@ -700,6 +818,35 @@ def generate_audio_player_embed(
   pt.addEventListener('click', function(e) {{
     var r = pt.getBoundingClientRect();
     aud.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * aud.duration;
+  }});
+
+  // ── Authenticated download handler ──
+  // Uses JS fetch+blob instead of <a href> to include auth headers.
+  // The blob URL is revoked immediately after the download to free memory.
+  dl.addEventListener('click', function(e) {{
+    e.preventDefault();
+    var t = tracks[curIdx];
+    if (t.url.indexOf('/api/') === -1) {{
+      // External URL — normal navigation is fine
+      window.open(t.url, '_blank');
+      return;
+    }}
+    authFetch(t.url).then(function(resp) {{
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.blob();
+    }}).then(function(blob) {{
+      var dlUrl = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = dlUrl;
+      a.download = t.title + '.mp3';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(dlUrl);
+    }}).catch(function(err) {{
+      // Fallback: try direct link
+      window.open(t.url, '_blank');
+    }});
   }});
 
   // Volume
@@ -819,11 +966,19 @@ class Tools:
         )
         unload_ollama_models: bool = Field(
             default=False,
-            description="Unload all Ollama models before calling ComfyUI.",
+            description="Unload Llamacpp and ollama models before calling ComfyUI.",
         )
         ollama_url: str = Field(
             default="http://host.docker.internal:11434",
             description="Ollama API URL.",
+        )
+        unload_llamacpp_models: bool = Field(
+            default=False,
+            description="Unload all llama.cpp (llama-server router) models before calling ComfyUI.",
+        )
+        llamacpp_url: str = Field(
+            default="http://localhost:8082",
+            description="llama-server API URL (router mode). Used for model unloading via POST /models/unload.",
         )
         save_to_storage: bool = Field(
             default=True,
@@ -833,9 +988,9 @@ class Tools:
             default=True,
             description="Show the embedded audio player.",
         )
-        batch_size: int = Field(
-            default=1,
-            description="Number of tracks to generate per request.",
+        max_batch_size: int = Field(
+            default=4,
+            description="Maximum batch size users can set.",
         )
         max_duration: int = Field(
             default=180,
@@ -901,6 +1056,14 @@ class Tools:
             default=True,
             description="Enable generate audio codes for better quality.",
         )
+        colorful_player: bool = Field(
+            default=True,
+            description="Use colorful rainbow gradient player. When off, a minimalistic grey style is used.",
+        )
+        batch_size: int = Field(
+            default=1,
+            description="Number of tracks to generate per request.",
+        )
         steps: int = Field(default=8, description="Sampling steps.")
         seed: int = Field(default=-1, description="Random seed (-1 for random).")
 
@@ -942,8 +1105,8 @@ class Tools:
         :param language: Language code (e.g. "en", "zh", "ja").
         :param time_signature: Time signature (e.g., 4 for 4/4, 3 for 3/4).
         """
-        batch_size = self.valves.batch_size
         user_valves = __user__.get("valves", self.UserValves())
+        batch_size = min(user_valves.batch_size, self.valves.max_batch_size)
 
         if duration > self.valves.max_duration:
             duration = self.valves.max_duration
@@ -952,18 +1115,41 @@ class Tools:
         if steps > self.valves.max_number_of_steps:
             steps = self.valves.max_number_of_steps
 
+        # ── Unload Ollama models ──────────────────────────────────────────────
         if self.valves.unload_ollama_models:
             if __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": "Unloading models...", "done": False},
+                        "data": {
+                            "description": "Unloading Ollama models...",
+                            "done": False,
+                        },
                     }
                 )
             unloaded = await unload_all_models_async(self.valves.ollama_url)
             await asyncio.sleep(2)
             if not unloaded:
                 print("Warning: Ollama models may not have fully unloaded.")
+
+        # ── Unload llama.cpp models ───────────────────────────────────────────
+        if self.valves.unload_llamacpp_models:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Unloading llama.cpp models...",
+                            "done": False,
+                        },
+                    }
+                )
+            unloaded_cpp = await unload_all_llamacpp_models_async(
+                self.valves.llamacpp_url
+            )
+            await asyncio.sleep(1)
+            if not unloaded_cpp:
+                print("Warning: llama.cpp models may not have fully unloaded.")
 
         if __event_emitter__:
             await __event_emitter__(
@@ -1046,7 +1232,7 @@ class Tools:
             workflow[sampler_node_id]["inputs"]["steps"] = steps
 
         if save_node_id in workflow:
-            safe_title = re.sub(r"[^\w\s-]", "", song_title).strip().replace(" ", "_")
+            safe_title = re.sub(r"[^\w\s-]", "", song_title).strip()
             workflow[save_node_id]["inputs"]["filename_prefix"] = f"audio/{safe_title}"
 
         if not self.valves.unload_comfyui_models:
@@ -1103,13 +1289,15 @@ class Tools:
 
             user_obj = None
             if self.valves.save_to_storage and __request__:
-                user_obj = Users.get_user_by_id(__user__["id"])
+                user_obj = await Users.get_user_by_id(__user__["id"])
 
             for idx, finfo in enumerate(audio_files):
                 fname = finfo["filename"]
                 subfolder = finfo["subfolder"]
                 track_title = (
-                    song_title if batch_size <= 1 else f"{song_title} (Track {idx + 1})"
+                    song_title
+                    if batch_size <= 1 or idx == 0
+                    else f"{song_title} {idx + 1}"
                 )
 
                 if user_obj and __request__:
@@ -1136,7 +1324,12 @@ class Tools:
             message = "Song successfully generated, tell the user"
             if self.valves.show_player_embed and track_list:
                 final_html = generate_audio_player_embed(
-                    track_list, song_title, tags, lyrics, palette_seed=palette_seed
+                    track_list,
+                    song_title,
+                    tags,
+                    lyrics,
+                    palette_seed=palette_seed,
+                    colorful=user_valves.colorful_player,
                 )
                 await __event_emitter__(
                     {"type": "embeds", "data": {"embeds": [final_html]}}
