@@ -3,12 +3,13 @@ title: Cloudflare Workers AI Image Generator
 author: tan-yong-sheng
 author_url: https://github.com/tan-yong-sheng
 description: Generate images using Cloudflare Workers AI text-to-image models with preprocessing for different model types
-version: 0.1.0
+version: 1.1.1
 license: MIT
-requirements: requests
+requirements: aiohttp
 """
 
-import requests
+import asyncio
+import aiohttp
 import base64
 import json
 import os
@@ -16,8 +17,10 @@ import uuid
 from typing import Dict, Any, Optional, Callable
 from pydantic import BaseModel, Field
 
-# Import CACHE_DIR from OpenWebUI backend configuration
-from open_webui.config import CACHE_DIR
+from fastapi import Request, UploadFile
+from open_webui.models.users import Users
+from open_webui.routers.files import upload_file_handler
+import io
 
 
 def _get_model_config(model_name: str) -> Dict[str, Any]:
@@ -209,7 +212,10 @@ class Tools:
         self.citation = False
 
     class Valves(BaseModel):
-        cloudflare_api_token: str = Field("", description="Your Cloudflare API Token")
+        cloudflare_api_token: str = Field(
+            default="", description="Your Cloudflare API Token",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         cloudflare_account_id: str = Field("", description="Your Cloudflare Account ID")
         default_model: str = Field(
             "@cf/black-forest-labs/flux-1-schnell",
@@ -224,6 +230,8 @@ class Tools:
         steps: int = 4,
         guidance: float = 7.5,
         seed: Optional[int] = None,
+        __user__: Dict[str, Any] = {},
+        __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable] = None,
     ) -> str:
         """
@@ -313,69 +321,91 @@ class Tools:
                     }
                 )
 
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        error_msg = f"API Error {response.status}: {error_text}"
+                        if __event_emitter__:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": f"Error: {error_msg}",
+                                        "done": True,
+                                    },
+                                }
+                            )
+                        return f"Error: {error_msg}"
 
-            if response.status_code != 200:
-                error_msg = f"API Error {response.status_code}: {response.text}"
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"Error: {error_msg}",
-                                "done": True,
-                            },
-                        }
-                    )
-                return f"Error: {error_msg}"
+                    # Handle different response formats based on actual Cloudflare API behavior
+                    content_type = response.headers.get("content-type", "").lower()
 
-            # Handle different response formats based on actual Cloudflare API behavior
-            content_type = response.headers.get("content-type", "").lower()
+                    # Process response and save image using upload_file_handler
+                    filename = f"{uuid.uuid4()}.jpg"
+                    image_binary = None
 
-            # Process response and save image to cache directory
-            directory = os.path.join(CACHE_DIR, "image", "generations")
-            os.makedirs(directory, exist_ok=True)
+                    if "application/json" in content_type:
+                        # JSON response - FLUX models return base64
+                        try:
+                            result = await response.json()
 
-            filename = f"{uuid.uuid4()}.jpg"
-            save_path = os.path.join(directory, filename)
+                            # Extract image data from Cloudflare's nested structure
+                            if "result" in result and isinstance(
+                                result["result"], dict
+                            ):
+                                image_data = result["result"].get("image")
+                            else:
+                                image_data = result.get("image")
 
-            if "application/json" in content_type:
-                # JSON response - FLUX models return base64
-                try:
-                    result = response.json()
+                            if not image_data:
+                                return f"Error: No image data found in response. Keys: {list(result.keys())}"
 
-                    # Extract image data from Cloudflare's nested structure
-                    if "result" in result and isinstance(result["result"], dict):
-                        image_data = result["result"].get("image")
+                            # Decode base64
+                            image_binary = base64.b64decode(image_data)
+
+                        except (json.JSONDecodeError, Exception) as e:
+                            return f"Error processing JSON response: {str(e)}"
+
                     else:
-                        image_data = result.get("image")
+                        # Binary response - other Stable Diffusion models
+                        image_binary = await response.read()
+                        if len(image_binary) < 100:
+                            return f"Error: Invalid binary image data received"
 
-                    if not image_data:
-                        return f"Error: No image data found in response. Keys: {list(result.keys())}"
+            if image_binary:
+                upload_file = UploadFile(
+                    file=io.BytesIO(image_binary),
+                    filename=filename,
+                    headers={"content-type": "image/jpeg"},
+                )
+                current_user = (
+                    Users.get_user_by_id(__user__["id"]) if __user__ else None
+                )
 
-                    # Decode base64 and save as binary
-                    image_binary = base64.b64decode(image_data)
-                    with open(save_path, "wb") as image_file:
-                        image_file.write(image_binary)
+                file_item = upload_file_handler(
+                    __request__,
+                    file=upload_file,
+                    metadata={},
+                    process=False,
+                    user=current_user,
+                )
 
-                except (json.JSONDecodeError, Exception) as e:
-                    return f"Error processing JSON response: {str(e)}"
-
-            else:
-                # Binary response - other Stable Diffusion models
-                image_binary = response.content
-                if len(image_binary) < 100:
-                    return f"Error: Invalid binary image data received"
-
-                with open(save_path, "wb") as image_file:
-                    image_file.write(image_binary)
-
-            # Generate the image URL (matching HuggingFace pattern exactly)
-            image_url = f"/cache/image/generations/{filename}"
+                if file_item and getattr(file_item, "id", None):
+                    file_id = str(getattr(file_item, "id", ""))
+                    image_url = __request__.app.url_path_for(
+                        "get_file_content_by_id", id=file_id
+                    )
+                else:
+                    return "Error: Failed to upload image to storage."
 
             # Debug: Log the image URL that was generated
             print(f"[DEBUG] Generated image URL: {image_url}")
-            print(f"[DEBUG] Image saved to {save_path}")
             print(f"[DEBUG] Event emitter available: {__event_emitter__ is not None}")
 
             # Try event emitters with error handling
@@ -420,7 +450,7 @@ class Tools:
                 )
             return f"Error: {error_msg}"
 
-        except requests.exceptions.Timeout:
+        except asyncio.TimeoutError:
             error_msg = "Request timed out. The image generation is taking longer than expected."
             if __event_emitter__:
                 await __event_emitter__(

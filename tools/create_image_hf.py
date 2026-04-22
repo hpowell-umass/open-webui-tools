@@ -3,7 +3,7 @@ title: Hugging Face API - Flux Pro Image Generator
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.0
+version: 1.0.1
 license: MIT
 description: HuggingFace API implementation for text to image generation
 """
@@ -14,9 +14,12 @@ import os
 from pydantic import BaseModel, Field
 import logging
 from aiohttp import ClientTimeout
+from typing import Optional
 
-# Import CACHE_DIR from your backend configuration so it matches the static files mount.
-from open_webui.config import CACHE_DIR
+from fastapi import Request, UploadFile
+from open_webui.models.users import Users
+from open_webui.routers.files import upload_file_handler
+import io
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +36,7 @@ class Tools:
         HF_API_KEY: str = Field(
             default=None,
             description="HuggingFace API key for accessing the serverless endpoints",
+            json_schema_extra={"input": {"type": "password"}},
         )
         HF_API_URL: str = Field(
             default="https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-3.5-large-turbo",
@@ -47,6 +51,7 @@ class Tools:
         prompt: str,
         image_format: str = "default",
         __user__: dict = {},
+        __request__: Optional[Request] = None,
         __event_emitter__=None,
     ) -> str:
         """
@@ -118,17 +123,31 @@ class Tools:
 
                     image_content = await response.read()
 
-            directory = os.path.join(CACHE_DIR, "image", "generations")
-            os.makedirs(directory, exist_ok=True)
-
             filename = f"{uuid.uuid4()}.png"
-            save_path = os.path.join(directory, filename)
+            upload_file = UploadFile(
+                file=io.BytesIO(image_content),
+                filename=filename,
+                headers={"content-type": "image/png"},
+            )
+            current_user = Users.get_user_by_id(__user__["id"]) if __user__ else None
 
-            with open(save_path, "wb") as image_file:
-                image_file.write(image_content)
-            print(f"[DEBUG] Image saved to {save_path}")
+            file_item = upload_file_handler(
+                __request__,
+                file=upload_file,
+                metadata={},
+                process=False,
+                user=current_user,
+            )
 
-            image_url = f"/cache/image/generations/{filename}"
+            if file_item and getattr(file_item, "id", None):
+                file_id = str(getattr(file_item, "id", ""))
+                image_url = __request__.app.url_path_for(
+                    "get_file_content_by_id", id=file_id
+                )
+            else:
+                return "Error: Failed to upload image to storage."
+
+            print(f"[DEBUG] Image uploaded successfully, relative URL: {image_url}")
 
             await __event_emitter__(
                 {

@@ -5,15 +5,15 @@ Supports advanced parameters like key, tempo, language, and batch size.
 Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Model) for model unloading functionality (can be customized via unload_node ID).
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
-funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.6.0
+funding_url: https://github.com/Haervwe/open-webui-tools/
+version: 0.6.1
 """
 
 import json
 import io
 import re
 import random
-from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
+from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union, Tuple
 import aiohttp
 import asyncio
 import uuid
@@ -31,11 +31,12 @@ async def connect_submit_and_wait(
     prompt_payload: Dict[str, Any],
     client_id: str,
     max_wait_time: int,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     start_time = asyncio.get_event_loop().time()
     prompt_id = None
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=headers) as session:
         ws_url = f"{comfyui_ws_url}?clientId={client_id}"
         try:
             async with session.ws_connect(ws_url) as ws:
@@ -201,6 +202,7 @@ async def download_audio_to_storage(
     filename: str,
     subfolder: str = "",
     song_name: str = "",
+    headers: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     try:
         file_extension = os.path.splitext(filename)[1] or ".mp3"
@@ -223,7 +225,7 @@ async def download_audio_to_storage(
             f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
         )
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_file_url) as response:
                 if response.status == 200:
                     audio_content = await response.read()
@@ -964,6 +966,11 @@ class Tools:
             default="http://localhost:8188",
             description="ComfyUI HTTP API endpoint.",
         )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         unload_ollama_models: bool = Field(
             default=False,
             description="Unload Llamacpp and ollama models before calling ComfyUI.",
@@ -1084,7 +1091,7 @@ class Tools:
         __user__: Dict[str, Any] = {},
         __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Generate music using ACE Step 1.5 with extended parameters.
 
@@ -1197,13 +1204,13 @@ class Tools:
             ckpoint_node = workflow[checkpoint_node_id]["inputs"].get("ckpt_name", "")
             unet_name = workflow[checkpoint_node_id]["inputs"].get("unet_name", "")
             if ckpoint_node:
-                workflow[checkpoint_node_id]["inputs"][
-                    "ckpt_name"
-                ] = self.valves.model_name
+                workflow[checkpoint_node_id]["inputs"]["ckpt_name"] = (
+                    self.valves.model_name
+                )
             if unet_name:
-                workflow[checkpoint_node_id]["inputs"][
-                    "unet_name"
-                ] = self.valves.model_name
+                workflow[checkpoint_node_id]["inputs"]["unet_name"] = (
+                    self.valves.model_name
+                )
 
         dual_clip_node_id = self.valves.dual_clip_loader_node
         vae_loader_node_id = self.valves.vae_loader_node
@@ -1260,6 +1267,10 @@ class Tools:
         )
         http_url = self.valves.comfyui_api_url
 
+        comfyui_headers = {}
+        if self.valves.comfyui_api_key:
+            comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
         # Use the gen_seed to deterministically pick a palette colour
         palette_seed = gen_seed % 1000000
 
@@ -1278,7 +1289,8 @@ class Tools:
                 )
 
             result_data = await connect_submit_and_wait(
-                ws_url, http_url, prompt_payload, client_id, self.valves.max_wait_time
+                ws_url, http_url, prompt_payload, client_id, self.valves.max_wait_time,
+                headers=comfyui_headers,
             )
 
             audio_files = extract_audio_files(result_data)
@@ -1302,7 +1314,8 @@ class Tools:
 
                 if user_obj and __request__:
                     storage_url = await download_audio_to_storage(
-                        __request__, user_obj, http_url, fname, subfolder, track_title
+                        __request__, user_obj, http_url, fname, subfolder, track_title,
+                        headers=comfyui_headers,
                     )
                     if storage_url:
                         track_list.append({"title": track_title, "url": storage_url})
@@ -1331,14 +1344,21 @@ class Tools:
                     palette_seed=palette_seed,
                     colorful=user_valves.colorful_player,
                 )
-                await __event_emitter__(
-                    {"type": "embeds", "data": {"embeds": [final_html]}}
+                track_links = " | ".join(
+                    f"[{t['title']}]({t['url']})" for t in track_list
                 )
-                message = "The audio player has been successfully embedded above. Inform the user that their song is ready to listen to or download in the above UI component."
+                return (
+                    HTMLResponse(
+                        content=final_html,
+                        headers={"Content-Disposition": "inline"},
+                    ),
+                    {"message": message, "tracks": track_list}
+                )
             else:
-                message += " to use the following download links:"
-
-            return {"message": message, "tracks": track_list}
+                track_links = "\n".join(
+                    f"- [{t['title']}]({t['url']})" for t in track_list
+                )
+                return f"Song '{song_title}' generated successfully!\n\nDownload links:\n{track_links}"
 
         except Exception as e:
             if __event_emitter__:

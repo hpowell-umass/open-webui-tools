@@ -3,7 +3,7 @@ title: OpenRouter Image Adapter Pipe
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 1.0.1
 description: OpenRouter Adapter Pipe for Open WebUI Tools.
 Features: Settings/valves: API key, allowed models, use websearch. Async streaming inference.
 Built-in websearch and image generation support.
@@ -29,7 +29,10 @@ import uuid
 
 class Pipe:
     class Valves(BaseModel):
-        API_KEY: str = Field(default="", description="OpenRouter API key")
+        API_KEY: str = Field(
+            default="", description="OpenRouter API key",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         ALLOWED_MODELS: List[str] = Field(
             default_factory=list, description="Allowed model slugs"
         )
@@ -374,12 +377,11 @@ class Pipe:
                 logging.error("Failed to save image to OpenWebUI")
                 return ""
             file_id = str(getattr(file_item, "id", ""))  # type: ignore
-            base_url = str(request.base_url).rstrip("/")
             relative_path = request.app.url_path_for(
                 "get_file_content_by_id", id=file_id
             )
             timestamp = int(time.time() * 1000)
-            url_with_cache_bust = f"{base_url}{relative_path}?t={timestamp}"
+            url_with_cache_bust = f"{relative_path}?t={timestamp}"
             return url_with_cache_bust
         except Exception as e:
             logging.error(f"Error saving image to OpenWebUI: {e}")

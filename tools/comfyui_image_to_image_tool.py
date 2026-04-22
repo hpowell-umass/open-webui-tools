@@ -4,7 +4,8 @@ description: Edit/transform images using ComfyUI workflows (Flux Kontext or Qwen
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 0.2.2
+required_open_webui_version: 0.8.11
 license: MIT
 """
 
@@ -15,8 +16,8 @@ import uuid
 import logging
 import aiohttp
 import io
-import requests
-from typing import Any, Dict, Optional, Callable, Awaitable, List, Literal
+
+from typing import Any, Dict, Optional, Callable, Awaitable, List, Literal, Tuple, Union
 from urllib.parse import quote
 from pydantic import BaseModel, Field
 from fastapi import UploadFile
@@ -255,33 +256,47 @@ DEFAULT_QWEN_EDIT_WORKFLOW: Dict[str, Any] = {
 }
 
 
-def get_loaded_models(api_url: str) -> List[Dict[str, Any]]:
+async def get_loaded_models_async(api_url: str) -> List[Dict[str, Any]]:
+    """Get all currently loaded models in VRAM"""
     try:
-        resp = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
-        resp.raise_for_status()
-        return resp.json().get("models", [])
-    except requests.RequestException:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{api_url.rstrip('/')}/api/ps", timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return data.get("models", [])
+    except Exception:
         logger.debug("Error fetching loaded Ollama models")
         return []
 
 
-def unload_all_models(api_url: str) -> None:
-    models = get_loaded_models(api_url)
-    if not models:
-        return
-    logger.debug("Unloading %d Ollama models...", len(models))
-    for model in models:
-        model_name = model.get("name") or model.get("model")
-        if model_name:
-            try:
-                payload = {"model": model_name, "keep_alive": 0}
-                requests.post(
-                    f"{api_url.rstrip('/')}/api/generate",
-                    json=payload,
-                    timeout=10,
-                )
-            except requests.RequestException:
-                pass
+async def unload_all_models_async(api_url: str) -> bool:
+    """Unload all currently loaded models from VRAM"""
+    try:
+        models = await get_loaded_models_async(api_url)
+        if not models:
+            return True
+        logger.debug("Unloading %d Ollama models...", len(models))
+        async with aiohttp.ClientSession() as session:
+            for model in models:
+                model_name = model.get("name") or model.get("model")
+                if model_name:
+                    payload = {"model": model_name, "keep_alive": 0}
+                    try:
+                        async with session.post(
+                            f"{api_url.rstrip('/')}/api/generate",
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            pass
+                    except Exception:
+                        pass
+        return True
+    except Exception as e:
+        logger.debug(f"Error unloading models: {e}")
+        return False
 
 
 async def wait_for_completion_ws(
@@ -290,9 +305,10 @@ async def wait_for_completion_ws(
     prompt_id: str,
     client_id: str,
     max_wait_time: int,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     start_time = time.monotonic()
-    async with aiohttp.ClientSession().ws_connect(
+    async with aiohttp.ClientSession(headers=headers).ws_connect(
         f"{comfyui_ws_url}?clientId={client_id}"
     ) as ws:
         async for msg in ws:
@@ -306,7 +322,7 @@ async def wait_for_completion_ws(
                     data = message.get("data", {})
 
                     if msg_type == "executed" and data.get("prompt_id") == prompt_id:
-                        async with aiohttp.ClientSession() as http_session:
+                        async with aiohttp.ClientSession(headers=headers) as http_session:
                             async with http_session.get(
                                 f"{comfyui_http_url}/history/{prompt_id}"
                             ) as resp:
@@ -369,12 +385,13 @@ async def download_and_upload_to_owui(
     subfolder: str,
     request: Any,
     user: Any,
+    headers: Optional[Dict[str, str]] = None,
 ) -> tuple[str, bool]:
     subfolder_param = f"&subfolder={quote(subfolder)}" if subfolder else ""
     comfyui_view_url = f"{comfyui_http_url}/view?filename={quote(filename)}&type=output{subfolder_param}"
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_view_url) as response:
                 if response.status != 200:
                     return comfyui_view_url, False
@@ -512,6 +529,11 @@ class Tools:
         comfyui_api_url: str = Field(
             default="http://localhost:8188", description="ComfyUI HTTP API endpoint."
         )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         workflow_type: Literal["Flux_Kontext", "Qwen_Image_Edit", "Custom"] = Field(
             default="Qwen_Image_Edit", description="Workflow to use for image editing."
         )
@@ -543,7 +565,7 @@ class Tools:
         __user__: Optional[Dict[str, Any]] = None,
         __request__: Optional[Any] = None,
         __messages__: Optional[List[Dict[str, Any]]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Edit or transform images using AI-powered workflows. Images are automatically extracted from the user's message.
 
@@ -588,7 +610,6 @@ class Tools:
         :param prompt: Detailed, enhanced instruction with specific visual details, style descriptions, and technical specifications for the image transformation
         """
         try:
-            
             if not __messages__:
                 return "Error: No messages provided. Please attach an image to your message."
 
@@ -610,7 +631,7 @@ class Tools:
             base64_images = base64_images[:3]
 
             if self.valves.unload_ollama_models:
-                unload_all_models(self.valves.ollama_api_url)
+                await unload_all_models_async(self.valves.ollama_api_url)
 
             if self.valves.workflow_type == "Flux_Kontext":
                 base_workflow = DEFAULT_FLUX_KONTEXT_WORKFLOW
@@ -635,6 +656,10 @@ class Tools:
                 "client_id": client_id,
             }
 
+            comfyui_headers = {}
+            if self.valves.comfyui_api_key:
+                comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
             if __event_emitter__:
                 if self.valves.workflow_type == "Custom":
                     status_message = "🎨 Editing image..."
@@ -652,7 +677,7 @@ class Tools:
                     }
                 )
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 async with session.post(
                     f"{http_api_url}/prompt",
                     json=payload,
@@ -671,6 +696,7 @@ class Tools:
                 prompt_id,
                 client_id,
                 self.valves.max_wait_time,
+                headers=comfyui_headers,
             )
 
             image_files = extract_image_files(job_data)
@@ -703,7 +729,8 @@ class Tools:
                     user = Users.get_user_by_id(user_id)
 
             image_url, uploaded = await download_and_upload_to_owui(
-                http_api_url, filename, subfolder, __request__, user
+                http_api_url, filename, subfolder, __request__, user,
+                headers=comfyui_headers,
             )
 
             if __event_emitter__:
@@ -717,8 +744,7 @@ class Tools:
                     }
                 )
 
-            if self.valves.return_html_embed:      
-
+            if self.valves.return_html_embed:
                 html_content = f"""<!DOCTYPE html>
 <html style="margin:0; padding:0; overflow:hidden;">
 <head>
@@ -793,8 +819,12 @@ class Tools:
     </div>
 </body>
 </html>"""
-                return HTMLResponse(
-                    content=html_content, headers={"content-disposition": "inline"}
+                return (
+                    HTMLResponse(
+                        content=html_content,
+                        headers={"Content-Disposition": "inline"},
+                    ),
+                    f"Image transformation complete and displayed above. Download link: {image_url}",
                 )
             else:
                 return f"✅ Image transformation complete!\n\n**Download:** [Edited Image]({image_url})\n\n**Direct link:** {image_url}"

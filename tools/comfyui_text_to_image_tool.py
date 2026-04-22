@@ -4,7 +4,8 @@ description: Generate images using ComfyUI Qwen Image workflow. Uses ComfyUI HTT
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.1.0
+version: 0.2.2
+required_open_webui_version: 0.8.11
 license: MIT
 """
 
@@ -15,8 +16,8 @@ import random
 import time
 import uuid
 import aiohttp
-import requests
-from typing import Any, Dict, Optional, Callable, Awaitable, List
+
+from typing import Any, Dict, Optional, Callable, Awaitable, List, Tuple, Union
 from urllib.parse import quote
 from pydantic import BaseModel, Field
 from fastapi import UploadFile
@@ -122,35 +123,47 @@ DEFAULT_QWEN_T2I_WORKFLOW: Dict[str, Any] = {
 }
 
 
-def get_loaded_models(api_url: str) -> List[Dict[str, Any]]:
+async def get_loaded_models_async(api_url: str) -> List[Dict[str, Any]]:
     """Get all currently loaded models in VRAM"""
     try:
-        resp = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
-        resp.raise_for_status()
-        return resp.json().get("models", [])
-    except requests.RequestException:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{api_url.rstrip('/')}/api/ps", timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return data.get("models", [])
+    except Exception:
         logger.debug("Error fetching loaded Ollama models")
         return []
 
 
-def unload_all_models(api_url: str) -> None:
+async def unload_all_models_async(api_url: str) -> bool:
     """Unload all currently loaded models from VRAM"""
-    models = get_loaded_models(api_url)
-    if not models:
-        return
-    logger.debug("Unloading %d Ollama models...", len(models))
-    for model in models:
-        model_name = model.get("name") or model.get("model")
-        if model_name:
-            try:
-                payload = {"model": model_name, "keep_alive": 0}
-                requests.post(
-                    f"{api_url.rstrip('/')}/api/generate",
-                    json=payload,
-                    timeout=10,
-                )
-            except requests.RequestException:
-                pass
+    try:
+        models = await get_loaded_models_async(api_url)
+        if not models:
+            return True
+        logger.debug("Unloading %d Ollama models...", len(models))
+        async with aiohttp.ClientSession() as session:
+            for model in models:
+                model_name = model.get("name") or model.get("model")
+                if model_name:
+                    payload = {"model": model_name, "keep_alive": 0}
+                    try:
+                        async with session.post(
+                            f"{api_url.rstrip('/')}/api/generate",
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            pass
+                    except Exception:
+                        pass
+        return True
+    except Exception as e:
+        logger.debug(f"Error unloading models: {e}")
+        return False
 
 
 async def wait_for_completion_ws(
@@ -159,10 +172,11 @@ async def wait_for_completion_ws(
     prompt_id: str,
     client_id: str,
     max_wait_time: int,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Wait for ComfyUI job completion via WebSocket"""
     start_time = time.monotonic()
-    async with aiohttp.ClientSession().ws_connect(
+    async with aiohttp.ClientSession(headers=headers).ws_connect(
         f"{comfyui_ws_url}?clientId={client_id}"
     ) as ws:
         async for msg in ws:
@@ -176,7 +190,7 @@ async def wait_for_completion_ws(
                     data = message.get("data", {})
 
                     if msg_type == "executed" and data.get("prompt_id") == prompt_id:
-                        async with aiohttp.ClientSession() as http_session:
+                        async with aiohttp.ClientSession(headers=headers) as http_session:
                             async with http_session.get(
                                 f"{comfyui_http_url}/history/{prompt_id}"
                             ) as resp:
@@ -237,13 +251,14 @@ async def download_and_upload_to_owui(
     subfolder: str,
     request: Any,
     user: Any,
+    headers: Optional[Dict[str, str]] = None,
 ) -> tuple[str, bool]:
     """Download image from ComfyUI and upload to OpenWebUI"""
     subfolder_param = f"&subfolder={quote(subfolder)}" if subfolder else ""
     comfyui_view_url = f"{comfyui_http_url}/view?filename={quote(filename)}&type=output{subfolder_param}"
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_view_url) as response:
                 if response.status != 200:
                     return comfyui_view_url, False
@@ -291,6 +306,11 @@ class Tools:
         comfyui_api_url: str = Field(
             default="http://localhost:8188", description="ComfyUI HTTP API endpoint."
         )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         custom_workflow: Optional[Dict[str, Any]] = Field(
             default=None,
             description="Custom ComfyUI workflow JSON (if not provided, uses default Qwen T2I workflow).",
@@ -319,47 +339,47 @@ class Tools:
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
         __user__: Optional[Dict[str, Any]] = None,
         __request__: Optional[Any] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Generate an image from a text prompt using ComfyUI Qwen Image workflow.
-        
+
         QWEN IMAGE PROMPTING GUIDE:
-        
+
         Qwen Image excels at generating detailed, photorealistic images with accurate text rendering.
-        
+
         PROMPT STRUCTURE (use all elements for best results):
         [Main Subject] + [Visual Style/Medium] + [Environment & Background] + [Lighting] + [Camera/Lens Language] + [Atmosphere & Details] + ["Exact Text in Quotes"]
-        
+
         KEY PROMPTING RULES:
-        
+
         1. **Text Rendering** (Qwen's Strength):
            - Always enclose exact text in "double quotes"
            - Specify font style, color, size if important
            - Example: "A neon sign reading \"OPEN 24/7\" in bright red letters"
-        
+
         2. **Five Major Elements**:
            - **Framing/Perspective**: eye-level, bird's eye view, low angle, close-up, wide shot
            - **Lens Type**: 50mm, wide-angle, telephoto, macro
            - **Style**: photorealistic, cinematic, oil painting, watercolor, anime
            - **Lighting**: golden hour, soft morning light, dramatic shadows, neon glow
            - **Atmosphere**: warm, moody, vibrant, ethereal
-        
+
         3. **Be Specific & Detailed**:
            - Describe subjects thoroughly (age, appearance, clothing, actions)
            - Include scene details (location, weather, time of day)
            - Add sensory details (textures, materials, colors)
-        
+
         4. **Natural Language**:
            - Write in clear, descriptive sentences
            - Use commas to separate elements
            - Be conversational but precise
-        
+
         EXAMPLE PROMPTS:
-        
+
         Good: "A cozy coffee shop interior, warm afternoon lighting streaming through large windows, a wooden sign on the brick wall reading \"DAILY GRIND\", vintage industrial style with exposed beams, potted plants on shelves, shot with 35mm lens at eye level, warm and inviting atmosphere"
-        
+
         Good: "Photorealistic portrait of a young woman in her 20s with long auburn hair, wearing a denim jacket, standing in front of a street sign that says \"MAIN ST\", golden hour lighting, shallow depth of field, urban background slightly blurred, warm color grading"
-        
+
         Good: "A vibrant neon-lit street scene in Hong Kong at night, multiple overlapping signs with Chinese and English text including \"龍鳳茶餐廳\" and \"HAPPY KARAOKE\", rain-soaked pavement reflecting colorful lights, shot from eye level, cinematic composition, moody cyberpunk atmosphere"
 
         :param prompt: Detailed text description following Qwen Image prompting guidelines above
@@ -378,7 +398,7 @@ class Tools:
                             },
                         }
                     )
-                unload_all_models(self.valves.ollama_api_url)
+                await unload_all_models_async(self.valves.ollama_api_url)
 
             # Prepare workflow
             base_workflow = (
@@ -396,8 +416,13 @@ class Tools:
             )
             comfyui_ws_url = f"{comfyui_ws_url}/ws"
 
+            # Build auth headers for ComfyUI
+            comfyui_headers = {}
+            if self.valves.comfyui_api_key:
+                comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
             payload = {"prompt": workflow, "client_id": client_id}
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 async with session.post(
                     f"{comfyui_http_url}/prompt", json=payload
                 ) as resp:
@@ -428,6 +453,7 @@ class Tools:
                 prompt_id,
                 client_id,
                 self.valves.max_wait_time,
+                comfyui_headers,
             )
 
             # Extract image files
@@ -443,6 +469,7 @@ class Tools:
                     img_info["subfolder"],
                     __request__,
                     Users.get_user_by_id(__user__["id"]) if __user__ else None,
+                    comfyui_headers,
                 )
                 image_urls.append(url)
 
@@ -466,7 +493,7 @@ class Tools:
 
             # Build HTML embed with enhanced styling
             image_url = image_urls[0] if image_urls else ""
-            
+
             html_content = f"""<!DOCTYPE html>
 <html style="margin:0; padding:0; overflow:hidden;">
 <head>
@@ -542,10 +569,13 @@ class Tools:
 </body>
 </html>"""
 
-            return HTMLResponse(
-                content=html_content,
-                media_type="text/html",
-                headers={"content-disposition": "inline"},
+            return (
+                HTMLResponse(
+                    content=html_content,
+                    media_type="text/html",
+                    headers={"content-disposition": "inline"},
+                ),
+                f"Image generated successfully and displayed above. Download link: {image_url}",
             )
 
         except Exception as e:

@@ -4,52 +4,60 @@ author: Haervwe
 Based on @justinrahb tool
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.3
-required_open_webui_version: 0.6.31
+version: 0.3.1
+required_open_webui_version: 0.8.11
 """
 
-import requests
+import aiohttp
 from fastapi import Request
 from pydantic import BaseModel, Field
-from typing import Any, Callable, Optional, Dict, List
+from typing import Any, Callable, Optional, Dict, List, Tuple, Union
 from open_webui.routers.images import image_generations, GenerateImageForm
 from open_webui.models.users import Users
 from fastapi.responses import HTMLResponse
 
-def get_loaded_models(api_url: str = "http://localhost:11434") -> List[Dict[str, Any]]:
+
+async def get_loaded_models_async(
+    api_url: str = "http://localhost:11434",
+) -> List[Dict[str, Any]]:
     """Get all currently loaded models in VRAM"""
     try:
-        response = requests.get(f"{api_url.rstrip('/')}/api/ps")
-        response.raise_for_status()
-        return response.json().get("models", [])
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{api_url.rstrip('/')}/api/ps") as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return data.get("models", [])
+    except Exception as e:
         print(f"Error fetching loaded models: {e}")
-        raise
+        return []
 
 
-def unload_all_models(api_url: str = "http://localhost:11434") -> dict[str, bool]:
+async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bool:
     """Unload all currently loaded models from VRAM"""
     try:
-        loaded_models = get_loaded_models(api_url)
-        results = {}
+        loaded_models = await get_loaded_models_async(api_url)
+        if not loaded_models:
+            return True
 
-        for model in loaded_models:
-            if isinstance(model, dict):
-                model_name = model.get("name", model.get("model", ""))
-            else:
-                model_name = str(model)
+        async with aiohttp.ClientSession() as session:
+            for model in loaded_models:
+                if isinstance(model, dict):
+                    model_name = model.get("name", model.get("model", ""))
+                else:
+                    model_name = str(model)
 
-            if model_name:
-                payload: Dict[str, Any] = {"model": model_name, "keep_alive": 0}
-                response = requests.post(
-                    f"{api_url.rstrip('/')}/api/generate", json=payload
-                )
-                results[model_name] = response.status_code == 200
+                if model_name:
+                    payload: Dict[str, Any] = {"model": model_name, "keep_alive": 0}
+                    async with session.post(
+                        f"{api_url.rstrip('/')}/api/generate", json=payload
+                    ) as resp:
+                        pass
 
-        return results
-    except requests.RequestException as e:
+        return True
+    except Exception as e:
         print(f"Error unloading models: {e}")
-        return {}
+        return False
 
 
 class Tools:
@@ -80,7 +88,7 @@ class Tools:
         __request__: Request | None = None,
         __user__: dict[str, Any] | None = None,
         __event_emitter__: Optional[Callable[[Dict[str, Any]], Any]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
         Generate an image given a prompt
 
@@ -98,7 +106,7 @@ class Tools:
                         },
                     }
                 )
-            unload_all_models(api_url=self.valves.ollama_url)
+            await unload_all_models_async(api_url=self.valves.ollama_url)
         if __event_emitter__:
             await __event_emitter__(
                 {
@@ -131,30 +139,24 @@ class Tools:
                 markdown_attachments.append(img_html)
 
             if self.valves.emit_embeds:
-                html_content = f'''<!DOCTYPE html>
+                html_content = f"""<!DOCTYPE html>
 <html style="margin:0; padding:0; overflow:hidden;">
 <head><meta charset="UTF-8"></head>
 <body style="margin:0; padding:0; overflow:hidden;">
 <div style="margin:0; padding:0; border:none; line-height:0;">{"".join(markdown_attachments)}</div>
 </body>
-</html>'''
-                return HTMLResponse(
-                    content=html_content,
-                    media_type="text/html",
-                    headers={"content-disposition": "inline"},
+</html>"""
+                urls_line = " ".join(bare_urls)
+                return (
+                    HTMLResponse(
+                        content=html_content,
+                        media_type="text/html",
+                        headers={"Content-Disposition": "inline"},
+                    ),
+                    f"Images generated and displayed inline. Download links: {urls_line}",
                 )
 
             urls_line = " ".join(bare_urls)
-
-            if self.valves.emit_embeds and __event_emitter__:
-                return f"""Images were generated and displayed inline. 
-            Provide these download links (bare URLs): {urls_line} 
-            - Do not use ! markdown attachments here. 
-            use download links and acknowledge the images were displayed above"""
-
-            if self.valves.emit_embeds and not __event_emitter__:
-                return f"Images were generated but could not be displayed inline (no event emitter). Provide these download links (bare URLs): {urls_line}"
-
             return f"Images generated. Provide the following download links (bare URLs): {urls_line}"
 
         except Exception as e:

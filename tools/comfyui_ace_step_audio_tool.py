@@ -4,20 +4,26 @@ description: Tool to generate songs using the ACE Step workflow via the ComfyUI 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.0
+version: 1.1.2
+required_open_webui_version: 0.8.11
 """
 
 import json
 import random
-from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union
+from typing import Optional, Dict, Any, Callable, Awaitable, cast, Union, Tuple
 import aiohttp
 import asyncio
 import uuid
 import os
 from pydantic import BaseModel, Field
-import requests
-from open_webui.config import CACHE_DIR
+
+from fastapi import Request, UploadFile
 from fastapi.responses import HTMLResponse
+from open_webui.models.users import Users
+from open_webui.routers.files import upload_file_handler
+import io
+import re
+
 
 async def wait_for_completion_ws(
     comfyui_ws_url: str,
@@ -26,6 +32,7 @@ async def wait_for_completion_ws(
     client_id: str,
     max_wait_time: int,
     event_emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Waits for ComfyUI job completion using WebSocket for real-time updates.
@@ -35,7 +42,7 @@ async def wait_for_completion_ws(
     job_data_output = None
 
     try:
-        async with aiohttp.ClientSession().ws_connect(
+        async with aiohttp.ClientSession(headers=headers).ws_connect(
             f"{comfyui_ws_url}?clientId={client_id}"
         ) as ws:
             # Suppress noisy status emissions: UI now logs each message; keep silent during progress
@@ -86,7 +93,7 @@ async def wait_for_completion_ws(
                             # Suppress cached notice
                             pass
 
-                            async with aiohttp.ClientSession() as http_session:
+                            async with aiohttp.ClientSession(headers=headers) as http_session:
                                 async with http_session.get(
                                     f"{comfyui_http_url}/history/{prompt_id}"
                                 ) as resp:
@@ -104,7 +111,7 @@ async def wait_for_completion_ws(
                         ):
                             # Defer success messaging to caller
                             job_data_output = data.get("output", {})
-                            async with aiohttp.ClientSession() as http_session:
+                            async with aiohttp.ClientSession(headers=headers) as http_session:
                                 async with http_session.get(
                                     f"{comfyui_http_url}/history/{prompt_id}"
                                 ) as resp:
@@ -114,7 +121,7 @@ async def wait_for_completion_ws(
                                             return history[prompt_id]
 
                             if job_data_output:
-                                    return {"outputs": job_data_output}  # type: ignore[return-value]
+                                return {"outputs": job_data_output}  # type: ignore[return-value]
                             raise Exception(
                                 "Job executed, but failed to retrieve output from WebSocket or history."
                             )
@@ -191,16 +198,17 @@ def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
                                 fn_val: Any = file_info_dict.get("filename")
                                 filename = fn_val if isinstance(fn_val, str) else None
                                 subfolder_val: Any = file_info_dict.get("subfolder", "")
-                                subfolder = str(subfolder_val) if subfolder_val is not None else ""
+                                subfolder = (
+                                    str(subfolder_val)
+                                    if subfolder_val is not None
+                                    else ""
+                                )
                             else:
                                 # Treat any non-dict entry as a filename string
                                 filename = str(file_info_item)
 
-                            if (
-                                filename is not None
-                                and filename.lower().endswith(
-                                    (".wav", ".mp3", ".flac", ".ogg")
-                                )
+                            if filename is not None and filename.lower().endswith(
+                                (".wav", ".mp3", ".flac", ".ogg")
                             ):
                                 audio_files.append(
                                     {
@@ -211,41 +219,64 @@ def extract_audio_files(job_data: Dict[str, Any]) -> list[Dict[str, str]]:
     return audio_files
 
 
-async def download_audio_to_cache(
-    comfyui_http_url: str, filename: str, subfolder: str = "", base_url: str = ""
+async def download_audio_to_storage(
+    request: Request,
+    user,
+    comfyui_http_url: str,
+    filename: str,
+    subfolder: str = "",
+    song_name: str = "",
+    headers: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
-    """
-    Download audio file from ComfyUI to OpenWebUI cache directory.
-    Returns the local cache URL path if successful, None otherwise.
-    """
     try:
-        # Create cache directory for audio files (similar to image pattern)
-        cache_audio_dir = os.path.join(CACHE_DIR, "audio", "generations")
-        os.makedirs(cache_audio_dir, exist_ok=True)
-
-        # Generate unique filename to avoid conflicts
         file_extension = os.path.splitext(filename)[1] or ".mp3"
-        local_filename = f"{uuid.uuid4()}{file_extension}"
-        local_file_path = os.path.join(cache_audio_dir, local_filename)
+        if song_name:
+            safe_name = re.sub(r"[^\w\s-]", "", song_name).strip().replace(" ", "_")
+            local_filename = f"{safe_name}{file_extension}"
+        else:
+            local_filename = f"ace_step_{uuid.uuid4().hex[:8]}{file_extension}"
 
-        # Build ComfyUI download URL
+        mime_map = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".flac": "audio/flac",
+            ".ogg": "audio/ogg",
+        }
+        content_type = mime_map.get(file_extension.lower(), "audio/mpeg")
+
         subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
         comfyui_file_url = (
             f"{comfyui_http_url}/view?filename={filename}&type=output{subfolder_param}"
         )
 
-        # Download file from ComfyUI
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(comfyui_file_url) as response:
                 if response.status == 200:
                     audio_content = await response.read()
 
-                    # Save to local cache
-                    with open(local_file_path, "wb") as audio_file:
-                        audio_file.write(audio_content)
+                    upload_file = UploadFile(
+                        file=io.BytesIO(audio_content),
+                        filename=local_filename,
+                        headers={"content-type": content_type},
+                    )
 
-                    # Return the cache URL path that OpenWebUI can serve
-                    return f"{base_url}/cache/audio/generations/{local_filename}"
+                    file_item = upload_file_handler(
+                        request,
+                        file=upload_file,
+                        metadata={},
+                        process=False,
+                        user=user,
+                    )
+
+                    if file_item and getattr(file_item, "id", None):
+                        file_id = str(getattr(file_item, "id", ""))
+                        relative_path = request.app.url_path_for(
+                            "get_file_content_by_id", id=file_id
+                        )
+                        return f"{relative_path}"
+
+                    print("[DEBUG] upload_file_handler returned no file item")
+                    return None
                 else:
                     print(
                         f"[DEBUG] Failed to download audio from ComfyUI: HTTP {response.status}"
@@ -253,50 +284,74 @@ async def download_audio_to_cache(
                     return None
 
     except Exception as e:
-        print(f"[DEBUG] Error downloading audio to cache: {str(e)}")
+        print(f"[DEBUG] Error uploading audio to storage: {str(e)}")
         return None
 
 
-def get_loaded_models(api_url: str = "http://localhost:11434") -> list[Dict[str, Any]]:
+async def get_loaded_models_async(
+    api_url: str = "http://localhost:11434",
+) -> list[Dict[str, Any]]:
     """Get all currently loaded models in VRAM"""
     try:
-        response = requests.get(f"{api_url.rstrip('/')}/api/ps")
-        response.raise_for_status()
-        models = response.json().get("models", [])
-        return cast(list[Dict[str, Any]], models)
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{api_url.rstrip('/')}/api/ps") as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return cast(list[Dict[str, Any]], data.get("models", []))
+    except Exception as e:
         print(f"Error fetching loaded models: {e}")
-        raise
+        return []
 
 
-def unload_all_models(api_url: str = "http://localhost:11434") -> dict[str, bool]:
+async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bool:
     """Unload all currently loaded models from VRAM"""
     try:
-        loaded_models = get_loaded_models(api_url)
-        results: Dict[str, bool] = {}
+        loaded_models = await get_loaded_models_async(api_url)
+        if not loaded_models:
+            return True
 
-        for model in loaded_models:
-            model_name = model.get("name", model.get("model", ""))
-            if model_name:
-                payload: Dict[str, Any] = {"model": model_name, "keep_alive": 0}
-                response = requests.post(
-                    f"{api_url.rstrip('/')}/api/generate", json=payload
-                )
-                results[model_name] = response.status_code == 200
+        async with aiohttp.ClientSession() as session:
+            for model in loaded_models:
+                model_name = model.get("name", model.get("model", ""))
+                if model_name:
+                    payload = {"model": model_name, "keep_alive": 0}
+                    async with session.post(
+                        f"{api_url.rstrip('/')}/api/generate", json=payload
+                    ) as resp:
+                        pass
 
-        return results
-    except requests.RequestException as e:
+        for _ in range(5):
+            await asyncio.sleep(1)
+            remaining = await get_loaded_models_async(api_url)
+            if not remaining:
+                print("All models successfully unloaded.")
+                return True
+
+        print("Warning: Some models might still be loaded after timeout.")
+        return False
+
+    except Exception as e:
         print(f"Error unloading models: {e}")
-        return {}
+        return False
 
 
-def generate_audio_player_embed(audio_url: str, song_title: str, tags: str, lyrics: Optional[str] = None) -> str:
+def generate_audio_player_embed(
+    audio_url: str, song_title: str, tags: str, lyrics: Optional[str] = None
+) -> str:
     """Generate a sleek custom audio player embed with styled controls."""
     # Escape HTML special characters
-    safe_title = song_title.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-    safe_tags = tags.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-    safe_lyrics = (lyrics or "Instrumental").replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-    
+    safe_title = (
+        song_title.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    safe_tags = tags.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    safe_lyrics = (
+        (lyrics or "Instrumental")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -688,6 +743,11 @@ class Tools:
             default="http://localhost:8188",
             description="ComfyUI HTTP API endpoint.",
         )
+        comfyui_api_key: str = Field(
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
         model_name: str = Field(
             default="ACE_STEP/ace_step_v1_3.5b.safetensors",
             description="Model name for ACE Step audio generation.",
@@ -717,10 +777,7 @@ class Tools:
             default=True,
             description="Copy the generated song to the Open Webui Storage Backend",
         )
-        owui_base_url: str = Field(
-            default="http://localhost:3000",
-            description="Your owui base url",
-        )
+
         show_player_embed: bool = Field(
             default=True,
             description="Show the embedded audio player. If false, only returns download link.",
@@ -735,8 +792,9 @@ class Tools:
         lyrics: Optional[str] = None,
         song_title: Optional[str] = None,
         __user__: Dict[str, Any] = {},
+        __request__: Optional[Request] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> str | HTMLResponse:
+    ) -> Union[str, Tuple[HTMLResponse, str]]:
         """
                 Tool used to generate music with AI local backend
                 Tags (prompt)
@@ -812,7 +870,7 @@ class Tools:
 
         if self.valves.unload_ollama_models:
             # Avoid emitting unload progress; silently perform action
-            unload_all_models(api_url=self.valves.ollama_url)
+            await unload_all_models_async(api_url=self.valves.ollama_url)
 
         if not self.valves.workflow_json:
             return "Error: Workflow JSON not provided in tool valves. Please configure."
@@ -823,12 +881,19 @@ class Tools:
         ws_scheme = "wss" if http_api_url.startswith("https") else "ws"
         ws_api_url = f"{ws_scheme}://{http_api_url.split('://', 1)[-1]}/ws"
 
+        comfyui_headers = {}
+        if self.valves.comfyui_api_key:
+            comfyui_headers["Authorization"] = f"Bearer {self.valves.comfyui_api_key}"
+
         try:
             workflow_template = json.loads(self.valves.workflow_json)
             active_workflow = json.loads(json.dumps(workflow_template))
 
             def safe_set_input(
-                wf_dict: Dict[str, Any], node_id: str, input_name: str, value_to_set: Any
+                wf_dict: Dict[str, Any],
+                node_id: str,
+                input_name: str,
+                value_to_set: Any,
             ) -> bool:
                 if node_id in wf_dict and "inputs" in wf_dict[node_id]:
                     wf_dict[node_id]["inputs"][input_name] = value_to_set
@@ -855,7 +920,10 @@ class Tools:
                 1, 2**32 - 1
             )
             client_id = str(uuid.uuid4())
-            payload: Dict[str, Any] = {"prompt": active_workflow, "client_id": client_id}
+            payload: Dict[str, Any] = {
+                "prompt": active_workflow,
+                "client_id": client_id,
+            }
 
             if __event_emitter__:
                 await __event_emitter__(
@@ -868,9 +936,11 @@ class Tools:
                     }
                 )
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 async with session.post(
-                    f"{http_api_url}/prompt", json=payload, timeout=aiohttp.ClientTimeout(total=30)
+                    f"{http_api_url}/prompt",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if resp.status != 200:
                         return f"ComfyUI API error on submission ({resp.status}): {await resp.text()}"
@@ -887,9 +957,11 @@ class Tools:
                 client_id,
                 self.valves.max_wait_time,
                 None,
+                headers=comfyui_headers,
             )
 
-           
+            current_user = Users.get_user_by_id(__user__["id"]) if __user__ else None
+
             audio_files = extract_audio_files(job_data)
 
             if audio_files:
@@ -898,8 +970,14 @@ class Tools:
                 subfolder = audio_file_info.get("subfolder", "")
 
                 if self.valves.save_local:
-                    local_audio_url = await download_audio_to_cache(
-                        http_api_url, filename, subfolder, self.valves.owui_base_url
+                    local_audio_url = await download_audio_to_storage(
+                        __request__,
+                        current_user,
+                        http_api_url,
+                        filename,
+                        subfolder,
+                        song_title or "",
+                        headers=comfyui_headers,
                     )
                     if not local_audio_url:
                         return "❌ Failed to download generated audio to local cache."
@@ -912,16 +990,21 @@ class Tools:
                                     "done": True,
                                 },
                             }
-                        )                   
+                        )
                     if self.valves.show_player_embed:
                         # Emit the minimalistic audio player
-                        html_player = generate_audio_player_embed(local_audio_url, song_title, tags, lyrics)
-                        response = HTMLResponse(content=html_player, headers={"content-disposition": "inline"})
+                        html_player = generate_audio_player_embed(
+                            local_audio_url, song_title, tags, lyrics
+                        )
+                        return (
+                            HTMLResponse(
+                                content=html_player,
+                                headers={"Content-Disposition": "inline"},
+                            ),
+                            f"Song '{song_title}' generated successfully! The audio player is embedded above. Download link: {local_audio_url}",
+                        )
                     else:
-                        response = f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({local_audio_url})\n\n**Direct link:** {local_audio_url}"
-                    
-
-                    return response
+                        return f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({local_audio_url})\n\n**Direct link:** {local_audio_url}"
                 else:
                     # Fallback to ComfyUI direct link if download fails
                     subfolder_param = f"&subfolder={subfolder}" if subfolder else ""
@@ -939,12 +1022,18 @@ class Tools:
                         )
                     if self.valves.show_player_embed:
                         # Emit the minimalistic audio player with ComfyUI URL
-                        html_player = generate_audio_player_embed(comfyui_url, song_title, tags, lyrics)
-                        response = HTMLResponse(content=html_player, headers={"content-disposition": "inline"})
+                        html_player = generate_audio_player_embed(
+                            comfyui_url, song_title, tags, lyrics
+                        )
+                        return (
+                            HTMLResponse(
+                                content=html_player,
+                                headers={"Content-Disposition": "inline"},
+                            ),
+                            f"Song '{song_title}' generated successfully! The audio player is embedded above. Download link: {comfyui_url}",
+                        )
                     else:
-                        response = f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({comfyui_url})\n\n**Direct link:** {comfyui_url}"
-
-                    return response
+                        return f"🎵 Song '{song_title}' generated successfully!\n\n**Download:** [{song_title}]({comfyui_url})\n\n**Direct link:** {comfyui_url}"
             else:
                 outputs_json = json.dumps(job_data.get("outputs", {}), indent=2)
                 if __event_emitter__:

@@ -8,7 +8,7 @@ author_url: https://github.com/Haervwe/open-webui-tools
 description: Edit images using the Flux Kontext workflow API in ComfyUI.
 required_open_webui_version: 0.4.0
 requirements:
-version: 5.1
+version: 6.1.1
 license: MIT
 
 ComfyUI Required Nodes For Default Workflow:
@@ -37,7 +37,7 @@ import time
 import uuid
 
 import aiohttp
-import requests
+
 from fastapi import UploadFile
 from pydantic import BaseModel, Field
 from typing import Dict, Callable, Optional, Union, Any, cast, Awaitable
@@ -170,6 +170,12 @@ class Pipe:
             title="ComfyUI Address",
             default="http://127.0.0.1:8188",
             description="Address of the running ComfyUI server.",
+        )
+        COMFYUI_API_KEY: str = Field(
+            title="ComfyUI API Key",
+            default="",
+            description="API key for ComfyUI authentication (Bearer token). Leave empty if not required.",
+            json_schema_extra={"input": {"type": "password"}},
         )
         COMFYUI_WORKFLOW_JSON: str = Field(
             title="ComfyUI Workflow JSON",
@@ -304,9 +310,14 @@ class Pipe:
     # Backend config persistence
     # ---------------------------
     def _get_config_path(self) -> str:
-        if getattr(self.valves, "CONFIG_BACKEND_PATH", "auto") and self.valves.CONFIG_BACKEND_PATH != "auto":
+        if (
+            getattr(self.valves, "CONFIG_BACKEND_PATH", "auto")
+            and self.valves.CONFIG_BACKEND_PATH != "auto"
+        ):
             return self.valves.CONFIG_BACKEND_PATH
-        return os.path.join(os.path.dirname(__file__), "flux_kontext_comfyui_config.json")
+        return os.path.join(
+            os.path.dirname(__file__), "flux_kontext_comfyui_config.json"
+        )
 
     def _load_config_and_apply(self) -> None:
         """Load config.json and apply overrides to valves (takes precedence)."""
@@ -323,7 +334,9 @@ class Pipe:
                     try:
                         setattr(self.valves, k, v)
                     except Exception:
-                        logger.warning(f"Failed to apply config key '{k}' with value '{v}'")
+                        logger.warning(
+                            f"Failed to apply config key '{k}' with value '{v}'"
+                        )
             logger.info(f"Applied settings from backend config at {cfg_path}")
         except Exception as e:
             logger.error(f"Failed to load config from {cfg_path}: {e}")
@@ -560,9 +573,12 @@ class Pipe:
     async def wait_for_job_signal(
         self, ws_api_url: str, prompt_id: str, event_emitter: Callable[..., Any]
     ) -> bool:
+        comfyui_headers = {}
+        if self.valves.COMFYUI_API_KEY:
+            comfyui_headers["Authorization"] = f"Bearer {self.valves.COMFYUI_API_KEY}"
         start_time = asyncio.get_event_loop().time()
         try:
-            async with aiohttp.ClientSession().ws_connect(
+            async with aiohttp.ClientSession(headers=comfyui_headers).ws_connect(
                 f"{ws_api_url}?clientId={self.client_id}"
             ) as ws:
                 async for msg in ws:
@@ -618,7 +634,6 @@ class Pipe:
         try:
             image_format = mimetypes.guess_extension(content_type)
             if not image_format:
-
                 image_format = ".png"
 
             file = UploadFile(
@@ -641,14 +656,15 @@ class Pipe:
                 raise Exception("Failed to save image to OpenWebUI")
 
             file_id = str(getattr(file_item, "id", ""))
-            
-            base_url = str(request.base_url).rstrip('/')
-            relative_path = request.app.url_path_for("get_file_content_by_id", id=file_id)
-            
+
+            relative_path = request.app.url_path_for(
+                "get_file_content_by_id", id=file_id
+            )
+
             timestamp = int(time.time() * 1000)
-            url_with_cache_bust = f"{base_url}{relative_path}?t={timestamp}"
-            
-            logger.info(f"Generated absolute URL for image: {url_with_cache_bust}")
+            url_with_cache_bust = f"{relative_path}?t={timestamp}"
+
+            logger.info(f"Generated relative URL for image: {url_with_cache_bust}")
             return str(url_with_cache_bust)
         except Exception as e:
             logger.error(f"Error saving image to OpenWebUI: {e}", exc_info=True)
@@ -676,8 +692,12 @@ class Pipe:
     async def _emit_setup_prompt(self, event_emitter: Callable[..., Any]) -> None:
         """Emit a planner-style input modal prompting the admin to paste a JSON payload for /setup save."""
         v = self.valves
-        def _num(val: Optional[Union[int, float]], default: Union[int, float]) -> Union[int, float]:
+
+        def _num(
+            val: Optional[Union[int, float]], default: Union[int, float]
+        ) -> Union[int, float]:
             return default if val is None else val
+
         example: Dict[str, Any] = {
             "KSAMPLER_STEPS": _num(v.KSAMPLER_STEPS, 20),
             "KSAMPLER_CFG": _num(v.KSAMPLER_CFG, 1.0),
@@ -689,7 +709,7 @@ class Pipe:
             "CLIP_NAME_2": v.CLIP_NAME_2 or "",
             "UNET_MODEL_NAME": v.UNET_MODEL_NAME or "",
             "VAE_NAME": v.VAE_NAME or "",
-            "save_to_backend": True
+            "save_to_backend": True,
         }
         placeholder = f"/setup save {json.dumps(example)}"
         await event_emitter(
@@ -703,8 +723,8 @@ class Pipe:
                         "Allowed keys: KSAMPLER_STEPS, KSAMPLER_CFG, KSAMPLER_SAMPLER_NAME, KSAMPLER_SCHEDULER, KSAMPLER_DENOISE, KSAMPLER_SEED, CLIP_NAME_1, CLIP_NAME_2, UNET_MODEL_NAME, VAE_NAME, save_to_backend"
                     ),
                     "placeholder": placeholder,
-                    "value": placeholder
-                }
+                    "value": placeholder,
+                },
             }
         )
 
@@ -745,14 +765,16 @@ class Pipe:
             k_id = self.valves.KSAMPLER_NODE_ID
             node = cast(Dict[str, Any], wf.get(k_id, {}))
             inputs = cast(Dict[str, Any], node.get("inputs", {}))
-            eff.update({
-                "steps": inputs.get("steps", eff["steps"]),
-                "cfg": inputs.get("cfg", eff["cfg"]),
-                "sampler_name": inputs.get("sampler_name", eff["sampler_name"]),
-                "scheduler": inputs.get("scheduler", eff["scheduler"]),
-                "denoise": inputs.get("denoise", eff["denoise"]),
-                "seed": inputs.get("seed", eff["seed"]),
-            })
+            eff.update(
+                {
+                    "steps": inputs.get("steps", eff["steps"]),
+                    "cfg": inputs.get("cfg", eff["cfg"]),
+                    "sampler_name": inputs.get("sampler_name", eff["sampler_name"]),
+                    "scheduler": inputs.get("scheduler", eff["scheduler"]),
+                    "denoise": inputs.get("denoise", eff["denoise"]),
+                    "seed": inputs.get("seed", eff["seed"]),
+                }
+            )
         except Exception:
             pass
         # Override with valves if provided
@@ -806,20 +828,83 @@ class Pipe:
         eff = self._get_effective_settings()
         # Ask for each parameter; blank means keep current
         # Steps (int)
-        steps_s = await self._ask_input(self.__event_call__, "Steps", "Enter number of steps (leave blank to keep)", str(eff["steps"]), str(eff["steps"]))
-        cfg_s = await self._ask_input(self.__event_call__, "CFG", "Enter CFG (leave blank to keep)", str(eff["cfg"]), str(eff["cfg"]))
-        sampler_s = await self._ask_input(self.__event_call__, "Sampler Name", "Enter sampler name (leave blank to keep)", str(eff["sampler_name"]), str(eff["sampler_name"]))
-        scheduler_s = await self._ask_input(self.__event_call__, "Scheduler", "Enter scheduler (leave blank to keep)", str(eff["scheduler"]), str(eff["scheduler"]))
-        denoise_s = await self._ask_input(self.__event_call__, "Denoise", "Enter denoise (leave blank to keep)", str(eff["denoise"]), str(eff["denoise"]))
-        seed_s = await self._ask_input(self.__event_call__, "Seed", "Enter seed (-1 for random, leave blank to keep or clear)", str(eff["seed"]) if eff["seed"] is not None else "", str(eff["seed"]) if eff["seed"] is not None else "")
-        clip1_s = await self._ask_input(self.__event_call__, "CLIP 1 Filename", "Enter CLIP 1 filename (leave blank to keep)", self.valves.CLIP_NAME_1 or "", self.valves.CLIP_NAME_1 or "")
-        clip2_s = await self._ask_input(self.__event_call__, "CLIP 2/T5 Filename", "Enter CLIP 2/T5 filename (leave blank to keep)", self.valves.CLIP_NAME_2 or "", self.valves.CLIP_NAME_2 or "")
-        unet_s = await self._ask_input(self.__event_call__, "UNet/Diffusion Filename", "Enter UNet/Diffusion filename (leave blank to keep)", self.valves.UNET_MODEL_NAME or "", self.valves.UNET_MODEL_NAME or "")
-        vae_s = await self._ask_input(self.__event_call__, "VAE Filename", "Enter VAE filename (leave blank to keep)", self.valves.VAE_NAME or "", self.valves.VAE_NAME or "")
+        steps_s = await self._ask_input(
+            self.__event_call__,
+            "Steps",
+            "Enter number of steps (leave blank to keep)",
+            str(eff["steps"]),
+            str(eff["steps"]),
+        )
+        cfg_s = await self._ask_input(
+            self.__event_call__,
+            "CFG",
+            "Enter CFG (leave blank to keep)",
+            str(eff["cfg"]),
+            str(eff["cfg"]),
+        )
+        sampler_s = await self._ask_input(
+            self.__event_call__,
+            "Sampler Name",
+            "Enter sampler name (leave blank to keep)",
+            str(eff["sampler_name"]),
+            str(eff["sampler_name"]),
+        )
+        scheduler_s = await self._ask_input(
+            self.__event_call__,
+            "Scheduler",
+            "Enter scheduler (leave blank to keep)",
+            str(eff["scheduler"]),
+            str(eff["scheduler"]),
+        )
+        denoise_s = await self._ask_input(
+            self.__event_call__,
+            "Denoise",
+            "Enter denoise (leave blank to keep)",
+            str(eff["denoise"]),
+            str(eff["denoise"]),
+        )
+        seed_s = await self._ask_input(
+            self.__event_call__,
+            "Seed",
+            "Enter seed (-1 for random, leave blank to keep or clear)",
+            str(eff["seed"]) if eff["seed"] is not None else "",
+            str(eff["seed"]) if eff["seed"] is not None else "",
+        )
+        clip1_s = await self._ask_input(
+            self.__event_call__,
+            "CLIP 1 Filename",
+            "Enter CLIP 1 filename (leave blank to keep)",
+            self.valves.CLIP_NAME_1 or "",
+            self.valves.CLIP_NAME_1 or "",
+        )
+        clip2_s = await self._ask_input(
+            self.__event_call__,
+            "CLIP 2/T5 Filename",
+            "Enter CLIP 2/T5 filename (leave blank to keep)",
+            self.valves.CLIP_NAME_2 or "",
+            self.valves.CLIP_NAME_2 or "",
+        )
+        unet_s = await self._ask_input(
+            self.__event_call__,
+            "UNet/Diffusion Filename",
+            "Enter UNet/Diffusion filename (leave blank to keep)",
+            self.valves.UNET_MODEL_NAME or "",
+            self.valves.UNET_MODEL_NAME or "",
+        )
+        vae_s = await self._ask_input(
+            self.__event_call__,
+            "VAE Filename",
+            "Enter VAE filename (leave blank to keep)",
+            self.valves.VAE_NAME or "",
+            self.valves.VAE_NAME or "",
+        )
 
         applied: Dict[str, Any] = {}
+
         # Apply conversions and set if provided
-        def _apply_num(key: str, raw: Optional[str], conv: Callable[[str], Union[int, float]]):
+        def _apply_num(
+            key: str, raw: Optional[str], conv: Callable[[str], Union[int, float]]
+        ):
             nonlocal applied
             if raw is None or raw == "":
                 return
@@ -880,11 +965,19 @@ class Pipe:
             except Exception:
                 pass
 
-        msg_lines = ["Applied settings:"] + [f"- {k}: {v}" for k, v in applied.items()] if applied else ["No changes applied"]
+        msg_lines = (
+            ["Applied settings:"] + [f"- {k}: {v}" for k, v in applied.items()]
+            if applied
+            else ["No changes applied"]
+        )
         if save_flag:
             msg_lines.append(f"Saved to: {saved_path or '(failed to save)'}")
-        await self.__event_emitter__({"type": "message", "data": {"content": "\n".join(msg_lines)}})
-        await self.emit_status(self.__event_emitter__, "success", "Setup updated", done=True)
+        await self.__event_emitter__(
+            {"type": "message", "data": {"content": "\n".join(msg_lines)}}
+        )
+        await self.emit_status(
+            self.__event_emitter__, "success", "Setup updated", done=True
+        )
 
     def _is_admin(self) -> bool:
         try:
@@ -936,15 +1029,29 @@ class Pipe:
         ut_low = user_text.strip().lower()
         if ut_low.startswith("/setup"):
             if not self.valves.ENABLE_SETUP_FORM:
-                await self.emit_status(self.__event_emitter__, "warning", "/setup is disabled by valves.", done=True)
+                await self.emit_status(
+                    self.__event_emitter__,
+                    "warning",
+                    "/setup is disabled by valves.",
+                    done=True,
+                )
                 return body
             if not self._is_admin():
-                await self.emit_status(self.__event_emitter__, "error", "Only admins can use /setup.", done=True)
+                await self.emit_status(
+                    self.__event_emitter__,
+                    "error",
+                    "Only admins can use /setup.",
+                    done=True,
+                )
                 return body
 
             if ut_low.startswith("/setup save"):
                 try:
-                    m = re.match(r"^/setup\s+save\s+(\{[\s\S]*\})\s*$", user_text.strip(), flags=re.IGNORECASE)
+                    m = re.match(
+                        r"^/setup\s+save\s+(\{[\s\S]*\})\s*$",
+                        user_text.strip(),
+                        flags=re.IGNORECASE,
+                    )
                     if not m:
                         raise ValueError("No JSON payload found after '/setup save'")
                     payload_str = m.group(1)
@@ -967,13 +1074,26 @@ class Pipe:
                         except Exception:
                             pass
 
-                    msg_lines = ["Applied settings:"] + [f"- {k}: {v}" for k, v in applied.items()]
+                    msg_lines = ["Applied settings:"] + [
+                        f"- {k}: {v}" for k, v in applied.items()
+                    ]
                     if save_flag:
-                        msg_lines.append(f"Saved to: {saved_path or '(failed to save)'}")
-                    await self.__event_emitter__({"type": "message", "data": {"content": "\n".join(msg_lines)}})
-                    await self.emit_status(self.__event_emitter__, "success", "Setup updated", done=True)
+                        msg_lines.append(
+                            f"Saved to: {saved_path or '(failed to save)'}"
+                        )
+                    await self.__event_emitter__(
+                        {"type": "message", "data": {"content": "\n".join(msg_lines)}}
+                    )
+                    await self.emit_status(
+                        self.__event_emitter__, "success", "Setup updated", done=True
+                    )
                 except Exception as e:
-                    await self.emit_status(self.__event_emitter__, "error", f"Failed to parse/save setup: {e}", done=True)
+                    await self.emit_status(
+                        self.__event_emitter__,
+                        "error",
+                        f"Failed to parse/save setup: {e}",
+                        done=True,
+                    )
                 return body
             await self._emit_current_values(self.__event_emitter__)
             await self._interactive_setup()
@@ -1018,7 +1138,7 @@ class Pipe:
             return "No vision model set for this task."
 
         if self.valves.UNLOAD_OLLAMA_MODELS:
-            unload_all_models(api_url=self.valves.OLLAMA_URL)
+            await unload_all_models_async(api_url=self.valves.OLLAMA_URL)
 
         try:
             workflow = json.loads(self.valves.COMFYUI_WORKFLOW_JSON)
@@ -1039,8 +1159,12 @@ class Pipe:
         )
         logger.info(f"Generated workflow: {workflow}")
 
+        comfyui_headers = {}
+        if self.valves.COMFYUI_API_KEY:
+            comfyui_headers["Authorization"] = f"Bearer {self.valves.COMFYUI_API_KEY}"
+
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=comfyui_headers) as session:
                 prompt_id = await self.queue_prompt(session, workflow)
                 if not prompt_id:
                     await self.emit_status(
@@ -1065,7 +1189,7 @@ class Pipe:
                         "Did not receive a successful execution signal from ComfyUI."
                     )
                 await asyncio.sleep(2)
-                
+
                 job_data = None
                 for attempt in range(5):
                     logger.info(
@@ -1081,9 +1205,11 @@ class Pipe:
                             logger.info(f"History JSON keys: {list(history.keys())}")
                             if prompt_id in history:
                                 job_data = history[prompt_id]
-                                logger.info("Successfully retrieved job data from history")
+                                logger.info(
+                                    "Successfully retrieved job data from history"
+                                )
                                 break
-                    
+
                     if attempt < 4:
                         wait_time = 2 + (attempt * 1)
                         logger.warning(
@@ -1098,8 +1224,10 @@ class Pipe:
                             all_history = await resp.json()
                             if prompt_id in all_history:
                                 job_data = all_history[prompt_id]
-                                logger.info("Successfully retrieved job data from full history")
-                
+                                logger.info(
+                                    "Successfully retrieved job data from full history"
+                                )
+
                 if not job_data:
                     raise Exception(
                         f"Failed to retrieve job data from history after multiple attempts. Prompt ID: {prompt_id}"
@@ -1119,8 +1247,10 @@ class Pipe:
                         content_type = http_response.headers.get(
                             "content-type", "image/png"
                         )
-                    
-                    logger.info(f"Downloaded image data: {len(image_data)} bytes, type: {content_type}")
+
+                    logger.info(
+                        f"Downloaded image data: {len(image_data)} bytes, type: {content_type}"
+                    )
 
                     public_image_url = self._save_image_and_get_public_url(
                         request=self.__request__,
@@ -1128,7 +1258,7 @@ class Pipe:
                         content_type=content_type,
                         user=self.__user__,
                     )
-                    
+
                     logger.info(f"Image saved with public URL: {public_image_url}")
 
                     alt_text = (
@@ -1164,33 +1294,47 @@ class Pipe:
         return body
 
 
-def get_loaded_models(api_url: str = "http://localhost:11434") -> list[Dict[str, Any]]:
+async def get_loaded_models_async(
+    api_url: str = "http://localhost:11434",
+) -> list[Dict[str, Any]]:
     try:
-        response = requests.get(f"{api_url.rstrip('/')}/api/ps", timeout=5)
-        response.raise_for_status()
-        return response.json().get("models", [])
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{api_url.rstrip('/')}/api/ps", timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                if response.status != 200:
+                    return []
+                data = await response.json()
+                return data.get("models", [])
+    except Exception as e:
         logger.error(f"Error fetching loaded Ollama models: {e}")
         return []
 
 
-def unload_all_models(api_url: str = "http://localhost:11434") -> None:
+async def unload_all_models_async(api_url: str = "http://localhost:11434") -> bool:
     try:
-        models = get_loaded_models(api_url)
+        models = await get_loaded_models_async(api_url)
         if not models:
-            return
+            return True
 
         logger.info(f"Unloading {len(models)} Ollama models...")
-        for model in models:
-            model_name = model.get("name")
-            if model_name:
-                requests.post(
-                    f"{api_url.rstrip('/')}/api/generate",
-                    json={"model": model_name, "keep_alive": 0},
-                    timeout=10,
-                )
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            for model in models:
+                model_name = model.get("name")
+                if model_name:
+                    try:
+                        async with session.post(
+                            f"{api_url.rstrip('/')}/api/generate",
+                            json={"model": model_name, "keep_alive": 0},
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            pass
+                    except Exception:
+                        pass
+        return True
+    except Exception as e:
         logger.error(f"Error unloading Ollama models: {e}")
+        return False
 
 
 def auto_check_model_loader(workflow: Dict[str, Any]) -> Dict[str, Any]:
