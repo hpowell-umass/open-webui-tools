@@ -3,7 +3,7 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.10.2
+version: 3.10.3
 required_open_webui_version: 0.9.1
 
 Features:
@@ -3222,7 +3222,7 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
 """
 
     @staticmethod
-    def build_system_prompt(
+    async def build_system_prompt(
         valves: Any,
         user_valves: Any,
         tools_spec: list,
@@ -5306,7 +5306,7 @@ class PlannerEngine:
             except Exception:
                 pass
 
-        plan_sys = PromptBuilder.build_system_prompt(
+        plan_sys = await PromptBuilder.build_system_prompt(
             valves,
             user_valves,
             [],
@@ -5532,7 +5532,7 @@ class PlannerEngine:
             except Exception:
                 pass
 
-        exec_sys = PromptBuilder.build_system_prompt(
+        exec_sys = await PromptBuilder.build_system_prompt(
             valves,
             user_valves,
             self.registry.get_complete_planner_specs(list(self.state.tasks.keys())),
