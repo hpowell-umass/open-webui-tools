@@ -6,8 +6,8 @@ Requires [ComfyUI-Unload-Model](https://github.com/SeanScripts/ComfyUI-Unload-Mo
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.5.4
-required_open_webui_version: 0.8.11
+version: 0.5.5
+required_open_webui_version: 0.9.1
 """
 
 import json
@@ -237,7 +237,7 @@ async def download_audio_to_storage(
                         headers={"content-type": content_type},
                     )
 
-                    file_item = upload_file_handler(
+                    file_item = await upload_file_handler(
                         request,
                         file=upload_file,
                         metadata={},
@@ -1202,7 +1202,7 @@ class Tools:
 
             user_obj = None
             if self.valves.save_to_storage and __request__:
-                user_obj = Users.get_user_by_id(__user__["id"])
+                user_obj = await Users.get_user_by_id(__user__["id"])
 
             for idx, finfo in enumerate(audio_files):
                 fname = finfo["filename"]

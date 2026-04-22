@@ -4,8 +4,8 @@ description: Edit/transform images using ComfyUI workflows (Flux Kontext or Qwen
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.2
-required_open_webui_version: 0.8.11
+version: 0.2.3
+required_open_webui_version: 0.9.1
 license: MIT
 """
 
@@ -399,7 +399,7 @@ async def download_and_upload_to_owui(
 
         if request and user:
             file = UploadFile(file=io.BytesIO(content), filename=filename)
-            file_item = upload_file_handler(
+            file_item = await upload_file_handler(
                 request=request, file=file, metadata={}, process=False, user=user
             )
             file_id = getattr(file_item, "id", None)
@@ -726,7 +726,7 @@ class Tools:
             if __user__:
                 user_id = __user__.get("id")
                 if user_id:
-                    user = Users.get_user_by_id(user_id)
+                    user = await Users.get_user_by_id(user_id)
 
             image_url, uploaded = await download_and_upload_to_owui(
                 http_api_url, filename, subfolder, __request__, user,

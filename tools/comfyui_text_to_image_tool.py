@@ -4,8 +4,8 @@ description: Generate images using ComfyUI Qwen Image workflow. Uses ComfyUI HTT
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.2.2
-required_open_webui_version: 0.8.11
+version: 0.2.3
+required_open_webui_version: 0.9.1
 license: MIT
 """
 
@@ -266,7 +266,7 @@ async def download_and_upload_to_owui(
 
         if request and user:
             file = UploadFile(file=io.BytesIO(content), filename=filename)
-            file_item = upload_file_handler(
+            file_item = await upload_file_handler(
                 request=request, file=file, metadata={}, process=False, user=user
             )
             file_id = getattr(file_item, "id", None)
@@ -468,7 +468,7 @@ class Tools:
                     img_info["filename"],
                     img_info["subfolder"],
                     __request__,
-                    Users.get_user_by_id(__user__["id"]) if __user__ else None,
+                    await Users.get_user_by_id(__user__["id"]) if __user__ else None,
                     comfyui_headers,
                 )
                 image_urls.append(url)

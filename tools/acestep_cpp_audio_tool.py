@@ -6,8 +6,8 @@ Allows unloading llama models (e.g. from llama-swap) before generation to free V
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.0.3
-required_open_webui_version: 0.8.11
+version: 1.0.4
+required_open_webui_version: 0.9.1
 """
 
 import json
@@ -119,7 +119,7 @@ async def download_audio_to_storage(
                         headers={"content-type": content_type},
                     )
 
-                    file_item = upload_file_handler(
+                    file_item = await upload_file_handler(
                         request,
                         file=upload_file,
                         metadata={},
@@ -771,7 +771,7 @@ class Tools:
             tracks = []
             user_obj = None
             if __user__ and __user__.get("id"):
-                user_obj = Users.get_user_by_id(__user__["id"])
+                user_obj = await Users.get_user_by_id(__user__["id"])
 
             for i, rel_url in enumerate(audio_urls):
                 full_audio_url = f"{base_url}{rel_url}"

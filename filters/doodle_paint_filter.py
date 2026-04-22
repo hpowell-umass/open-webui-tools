@@ -4,9 +4,9 @@ description: Toggleable filter that opens a paint canvas before sending each mes
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.2.0
+version: 1.2.1
 license: MIT
-required_open_webui_version: 0.6.5
+required_open_webui_version: 0.9.1
 """
 
 import open_webui.models.messages
@@ -339,7 +339,7 @@ return (function() {{
 }})()
 """
 
-    def _save_doodle_file(
+    async def _save_doodle_file(
         self, data_url: str, user_id: str, request: Any
     ) -> Optional[dict]:
         """
@@ -366,7 +366,7 @@ return (function() {{
         filename = f"doodle_{uuid.uuid4().hex[:8]}.{extension}"
 
         # Upload via OWUI's native handler (same as all other tools)
-        user = Users.get_user_by_id(user_id)
+        user = await Users.get_user_by_id(user_id)
         if not user:
             logger.error("Doodle Paint: could not resolve user")
             return None
@@ -376,7 +376,7 @@ return (function() {{
             filename=filename,
             headers={"content-type": content_type},
         )
-        file_item = upload_file_handler(
+        file_item = await upload_file_handler(
             request=request, file=file, metadata={}, process=False, user=user
         )
 
@@ -460,7 +460,7 @@ return (function() {{
 
         if user_id and __request__:
             try:
-                file_entry = self._save_doodle_file(data_url, user_id, __request__)
+                file_entry = await self._save_doodle_file(data_url, user_id, __request__)
                 if file_entry:
                     logger.info(f"Doodle Paint: file saved (id={file_entry['id']})")
                     
@@ -471,7 +471,7 @@ return (function() {{
                             last_msg_id = last_msg.get("id")
                             if last_msg_id:
                                 try:
-                                    Chats.add_message_files_by_id_and_message_id(
+                                    await Chats.add_message_files_by_id_and_message_id(
                                         __chat_id__,
                                         last_msg_id,
                                         [file_entry],

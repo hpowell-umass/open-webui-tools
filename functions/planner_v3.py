@@ -3,7 +3,7 @@ title: Planner v3
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 3.10.1
+version: 3.10.2
 required_open_webui_version: 0.9.1
 
 Features:
@@ -2121,7 +2121,7 @@ class StatePersistence:
                 headers=Headers({"content-type": "application/json"}),
             )
 
-            file_item = upload_file_handler(
+            file_item = await upload_file_handler(
                 request=request, file=file_upload, metadata={}, process=False, user=user
             )
 
@@ -3322,7 +3322,7 @@ Your goal is to verify if the subagent's FINAL response is complete, accurate, a
                 # Fallback to DB if not in app state (e.g. workspace presets not yet loaded)
                 if not name or not desc:
                     try:
-                        db_model = Models.get_model_by_id(m)
+                        db_model = await Models.get_model_by_id(m)
                         if db_model:
                             if not name:
                                 name = db_model.name

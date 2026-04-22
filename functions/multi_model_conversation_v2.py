@@ -3,7 +3,8 @@ title: Multi Model Conversations v2
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.9.0
+version: 2.9.1
+required_open_webui_version: 0.9.1
 """
 
 import logging
@@ -697,7 +698,7 @@ return (function() {
 
     def _check_model_native_fc(self, model_id: str) -> bool:
         """Return True if the model is configured for native function calling."""
-        model_info = Models.get_model_by_id(model_id)
+        model_info = await Models.get_model_by_id(model_id)
         if model_info and model_info.params:
             params = (
                 model_info.params.model_dump()
@@ -919,7 +920,7 @@ return (function() {
         __metadata__=None,
     ) -> str:
         self.__current_event_emitter__ = __event_emitter__
-        self.__user__ = Users.get_user_by_id(__user__["id"])
+        self.__user__ = await Users.get_user_by_id(__user__["id"])
         self.__model__ = __model__
         self.__request__ = __request__
         self.__metadata__ = __metadata__ or {}
@@ -1093,7 +1094,7 @@ return (function() {
 
             # Fetch model info to get default tools (toolIds) and features
             model_info = models_state.get(p_model_id, {})
-            model_db_info = Models.get_model_by_id(p_model_id)
+            model_db_info = await Models.get_model_by_id(p_model_id)
 
             logger.debug(
                 f"[MultiModelTools] Loading tools for participant model: {p_model_id}"
@@ -1242,7 +1243,7 @@ return (function() {
             )
 
             try:
-                builtin_tools = get_builtin_tools(
+                builtin_tools = await get_builtin_tools(
                     self.__request__,
                     extra_params,
                     features=p_features,
