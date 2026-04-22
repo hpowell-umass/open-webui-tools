@@ -3,8 +3,8 @@ title: Semantic Router Filter
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 2.0.0
-open_webui_version: 0.8.8
+version: 2.0.1
+required_open_webui_version: 0.9.1
 description: Filter that acts a model router, using model descriptions and capabilities
 (make sure to set them in the models you want to be presented to the router)
 and the prompt, selecting the best model base, pipe or preset for the task completion.
@@ -211,11 +211,11 @@ class Filter:
 
         return bool(last_message.get("images"))
 
-    def _get_full_model_data(self, model_id: str) -> Dict[str, Any]:
+    async def _get_full_model_data(self, model_id: str) -> Dict[str, Any]:
         """Construct a complete model data dictionary from app.state.MODELS and DB"""
         models_state = getattr(self.__request__.app.state, "MODELS", {})
         model_info = models_state.get(model_id, {})
-        model_db_info = Models.get_model_by_id(model_id)
+        model_db_info = await Models.get_model_by_id(model_id)
 
         meta = {}
         params = {}
@@ -269,7 +269,7 @@ class Filter:
             "owned_by": owned_by,
         }
 
-    def _get_available_models(
+    async def _get_available_models(
         self,
         filter_vision: bool = False,
     ) -> List[ModelInfo]:
@@ -288,7 +288,7 @@ class Filter:
             )
 
         for model_id in models_state.keys():
-            model_dict = self._get_full_model_data(model_id)
+            model_dict = await self._get_full_model_data(model_id)
             model_id = model_dict.get("id")
             meta = model_dict.get("meta", {})
             pipeline_type = model_dict.get("pipeline", {}).get("type")
@@ -581,7 +581,7 @@ class Filter:
 
             for file_id in file_ids:
                 try:
-                    file_metadata = Files.get_file_metadata_by_id(file_id)
+                    file_metadata = await Files.get_file_metadata_by_id(file_id)
                     if file_metadata:
                         if not any(f["id"] == file_metadata.id for f in files_data):
                             file_data = self._build_file_data(
@@ -890,7 +890,7 @@ class Filter:
         """Main filter entry point"""
         self.__request__ = __request__
         self.__model__ = __model__
-        self.__user__ = Users.get_user_by_id(__user__["id"]) if __user__ else None
+        self.__user__ = await Users.get_user_by_id(__user__["id"]) if __user__ else None
 
         models_state = getattr(self.__request__.app.state, "MODELS", {})
 
@@ -1102,7 +1102,7 @@ class Filter:
                 if self.valves.debug:
                     logger.debug("Message contains images, filtering for vision models")
 
-                available_models = self._get_available_models(filter_vision=True)
+                available_models = await self._get_available_models(filter_vision=True)
 
                 if not available_models and self.valves.vision_fallback_model_id:
                     if self.valves.debug:
@@ -1116,7 +1116,7 @@ class Filter:
                     logger.warning("No vision-capable models found and no fallback set")
                     return body
             else:
-                available_models = self._get_available_models(filter_vision=False)
+                available_models = await self._get_available_models(filter_vision=False)
 
             if not available_models:
                 logger.warning("No valid models found for routing")
@@ -1172,7 +1172,7 @@ class Filter:
 
             selected_model_full = None
             if selected_model["id"] in models_state:
-                selected_model_full = self._get_full_model_data(selected_model["id"])
+                selected_model_full = await self._get_full_model_data(selected_model["id"])
 
             if not selected_model_full:
                 logger.warning(
