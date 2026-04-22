@@ -4,8 +4,8 @@ description: Tool to generate speech using VibeVoice workflows via ComfyUI API. 
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.1.2
-required_open_webui_version: 0.8.11
+version: 1.1.3
+required_open_webui_version: 0.9.1
 """
 
 import os
@@ -267,7 +267,7 @@ async def download_audio_to_storage(
                         headers={"content-type": content_type},
                     )
 
-                    file_item = upload_file_handler(
+                    file_item = await upload_file_handler(
                         request,
                         file=upload_file,
                         metadata={},
@@ -830,7 +830,7 @@ class Tools:
         """
         try:
             # Get user valves
-            user = Users.get_user_by_id(__user__["id"])
+            user = await Users.get_user_by_id(__user__["id"])
             user_valves = (
                 user.valves
                 if hasattr(user, "valves") and user.valves
@@ -1009,7 +1009,7 @@ class Tools:
         """
         try:
             # Get user valves
-            user = Users.get_user_by_id(__user__["id"])
+            user = await Users.get_user_by_id(__user__["id"])
             user_valves = (
                 user.valves
                 if hasattr(user, "valves") and user.valves

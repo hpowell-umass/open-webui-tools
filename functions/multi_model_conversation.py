@@ -3,7 +3,8 @@ title: Multi Model Conversations (DEPRECATED)
 author: Haervwe
 author_url: https://github.com/Haervwe
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.9.2
+version: 0.9.3
+required_open_webui_version: 0.9.1
 """
 
 import logging
@@ -297,7 +298,7 @@ class Pipe:
         __request__=None,
     ) -> str:
         self.__current_event_emitter__ = __event_emitter__
-        self.__user__ = Users.get_user_by_id(__user__["id"])
+        self.__user__ = await Users.get_user_by_id(__user__["id"])
         self.__model__ = __model__
         self.__request__ = __request__
 

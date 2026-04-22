@@ -4,8 +4,8 @@ author: Haervwe
 Based on @justinrahb tool
 author_url: https://github.com/Haervwe/open-webui-tools
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 0.3.1
-required_open_webui_version: 0.8.11
+version: 0.3.2
+required_open_webui_version: 0.9.1
 """
 
 import aiohttp
@@ -121,7 +121,7 @@ class Tools:
             images = await image_generations(
                 request=__request__,
                 form_data=GenerateImageForm(prompt=prompt, model=model),
-                user=Users.get_user_by_id(__user__["id"]),
+                user=await Users.get_user_by_id(__user__["id"]),
             )
             if __event_emitter__:
                 await __event_emitter__(

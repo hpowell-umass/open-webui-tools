@@ -4,9 +4,9 @@ description: Interactive tools for text, choices, or images with ultra-rounded O
 author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
-version: 1.6.0
+version: 1.6.1
 license: MIT
-required_open_webui_version: 0.8.10
+required_open_webui_version: 0.9.1
 """
 import json
 import logging
@@ -580,10 +580,10 @@ return (function() {{
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_base64_from_file_id(file_id: str) -> Optional[str]:
+async def _get_base64_from_file_id(file_id: str) -> Optional[str]:
     """Resolves a file ID to a base64 data URL."""
     try:
-        file = Files.get_file_by_id(file_id)
+        file = await Files.get_file_by_id(file_id)
         if not file or not file.path:
             return None
         
@@ -729,7 +729,7 @@ class Tools:
                         await __event_emitter__({"type": "status", "data": {"description": f"Failed to fetch image from URL: {e}", "done": True}})
                     return json.dumps({"status": "error", "message": f"Failed to fetch image from URL: {e}"})
                 # Upload and process
-                file_item, file_url = upload_image(
+                file_item, file_url = await upload_image(
                     __request__,
                     image_data,
                     content_type,
@@ -738,7 +738,7 @@ class Tools:
                 )
             elif input_type == "doodle":
                 # Doodle is always base64 PNG
-                image_data, detected_type = get_image_data(data)
+                image_data, detected_type = await get_image_data(data)
                 if image_data is None:
                     if __event_emitter__:
                         await __event_emitter__({"type": "status", "data": {"description": "Failed to load doodle image data", "done": True}})
@@ -746,7 +746,7 @@ class Tools:
                 content_type = detected_type or "image/png"
                 name = "sketch.png"
                 # Upload and process
-                file_item, file_url = upload_image(
+                file_item, file_url = await upload_image(
                     __request__,
                     image_data,
                     content_type,
@@ -755,14 +755,14 @@ class Tools:
                 )
             else:  # upload
                 # Uploaded file: decode data URL, preserve filename/content type
-                image_data, detected_type = get_image_data(data)
+                image_data, detected_type = await get_image_data(data)
                 if image_data is None:
                     if __event_emitter__:
                         await __event_emitter__({"type": "status", "data": {"description": "Failed to load uploaded image data", "done": True}})
                     return json.dumps({"status": "error", "message": "Failed to load uploaded image data"})
                 content_type = content_type or detected_type or "image/png"
                 # Upload and process
-                file_item, file_url = upload_image(
+                file_item, file_url = await upload_image(
                     __request__,
                     image_data,
                     content_type,
@@ -790,9 +790,9 @@ class Tools:
                 # Matches built-in tool pattern for Assistant + historical perception for User
                 try:
                     # Assistant sync
-                    Chats.add_message_files_by_id_and_message_id(__chat_id__, __message_id__, image_files)
+                    await Chats.add_message_files_by_id_and_message_id(__chat_id__, __message_id__, image_files)
                     
-                    chat = Chats.get_chat_by_id(__chat_id__)
+                    chat = await Chats.get_chat_by_id(__chat_id__)
                     chat_data = chat.chat if hasattr(chat, 'chat') else (chat if isinstance(chat, dict) else {})
                     
                     if chat_data and "messages" in chat_data:
@@ -804,7 +804,7 @@ class Tools:
                         
                         if parent_id:
                             logger.info(f"User Input Tool Set: Syncing to parent User message {parent_id}")
-                            Chats.add_message_files_by_id_and_message_id(__chat_id__, parent_id, image_files)
+                            await Chats.add_message_files_by_id_and_message_id(__chat_id__, parent_id, image_files)
                             
                             parent_msg = next((m for m in messages if m.get("id") == parent_id), None)
                             if parent_msg:
@@ -816,13 +816,13 @@ class Tools:
                                 for f in image_files:
                                     f_id = f.get("id") or (f["url"].split("/files/")[1].split("/")[0] if "/api/v1/files/" in f.get("url", "") else None)
                                     if f_id:
-                                        base64_url = _get_base64_from_file_id(f_id)
+                                        base64_url = await _get_base64_from_file_id(f_id)
                                         if base64_url:
                                             exists = any(part.get("image_url", {}).get("url") == base64_url for part in parent_msg["content"] if part.get("type") == "image_url")
                                             if not exists:
                                                 parent_msg["content"].append({"type": "image_url", "image_url": {"url": base64_url}})
                                 
-                                Chats.update_chat_by_id(__chat_id__, chat_data)
+                                await Chats.update_chat_by_id(__chat_id__, chat_data)
                 except Exception as e:
                     logger.warning(f"User Input Tool Set: DB Sync failed: {e}")
 
@@ -845,7 +845,7 @@ class Tools:
                         for f in image_files:
                             f_id = f.get("id") or (f["url"].split("/files/")[1].split("/")[0] if "/api/v1/files/" in f.get("url", "") else None)
                             if f_id:
-                                base64_url = _get_base64_from_file_id(f_id)
+                                base64_url = await _get_base64_from_file_id(f_id)
                                 if base64_url:
                                     exists = any(part.get("image_url", {}).get("url") == base64_url for part in parent_msg_in_mem["content"] if part.get("type") == "image_url")
                                     if not exists:
@@ -951,10 +951,8 @@ class Tools:
                 headers=httpx.Headers({"content-type": content_type})
             )
 
-            # Call internal handler in threadpool to avoid deadlocking the event loop 
-            # (which is needed for the embedding coroutines in save_docs_to_vector_db)
-            file_item_res = await run_in_threadpool(
-                upload_file_handler,
+            # Call internal handler directly since it's now async
+            file_item_res = await upload_file_handler(
                 __request__,
                 file=upload_file,
                 metadata=json.dumps(metadata),
@@ -969,7 +967,7 @@ class Tools:
                 return f"Error: Failed to upload and process document. Response: {file_item_res}"
 
             # Retrieve the processed file to get the extracted content
-            processed_file = Files.get_file_by_id(file_id)
+            processed_file = await Files.get_file_by_id(file_id)
             if not processed_file:
                 return "Error: Could not retrieve processed file from database."
 
@@ -988,7 +986,7 @@ class Tools:
 
             if __chat_id__ and __message_id__:
                 try:
-                    Chats.add_message_files_by_id_and_message_id(__chat_id__, __message_id__, [file_info])
+                    await Chats.add_message_files_by_id_and_message_id(__chat_id__, __message_id__, [file_info])
                 except Exception as e:
                     logger.warning(f"Failed to sync document to chat: {e}")
 

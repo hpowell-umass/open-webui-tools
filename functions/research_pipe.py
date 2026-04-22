@@ -6,7 +6,8 @@ author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools
 original MCTS implementation i based this project of: https://github.com/av // https://openwebui.com/f/everlier/mcts/
 git: https://github.com/Haervwe/open-webui-tools
-version: 0.4.9
+version: 0.5.0
+required_open_webui_version: 0.9.1
 """
 
 from datetime import datetime 
@@ -651,7 +652,7 @@ class Pipe:
         model = self.valves.MODEL
         logger.debug(f"Model {model}")
         logger.debug(f"User: {__user__}")
-        self.__user__ = Users.get_user_by_id(__user__["id"])
+        self.__user__ = await Users.get_user_by_id(__user__["id"])
         self.__request__ = __request__
         if __task__ and __task__ != TASKS.DEFAULT:
             logger.debug(f"Model {TASKS}")

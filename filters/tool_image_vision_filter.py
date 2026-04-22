@@ -1,3 +1,12 @@
+"""
+title: Tool Image Vision
+author: Haervwe
+author_url: https://github.com/Haervwe
+funding_url: https://github.com/Haervwe/open-webui-tools
+version: 1.0.1
+required_open_webui_version: 0.9.1
+"""
+
 import logging
 import base64
 from pathlib import Path
@@ -25,10 +34,10 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
 
-    def get_base64_from_file_id(self, file_id: str) -> Optional[str]:
+    async def get_base64_from_file_id(self, file_id: str) -> Optional[str]:
         """Resolves a file ID to a base64 data URL."""
         try:
-            file = Files.get_file_by_id(file_id)
+            file = await Files.get_file_by_id(file_id)
             if not file or not file.path:
                 return None
             
@@ -77,7 +86,7 @@ class Filter:
 
         try:
             # Fetch message map once to identify files attached to messages in history
-            messages_map = Chats.get_messages_map_by_chat_id(__chat_id__)
+            messages_map = await Chats.get_messages_map_by_chat_id(__chat_id__)
             logger.info(f"ToolImageVisionFilter: Fetched {len(messages_map)} messages from DB")
         except Exception as e:
             logger.warning(f"ToolImageVisionFilter: Failed to get messages map: {e}")
@@ -212,7 +221,7 @@ class Filter:
                 if files_to_db and orig_msg_id:
                     try:
                         logger.info(f"ToolImageVisionFilter: Syncing {len(files_to_db)} files to DB message {orig_msg_id}")
-                        Chats.add_message_files_by_id_and_message_id(__chat_id__, orig_msg_id, files_to_db)
+                        await Chats.add_message_files_by_id_and_message_id(__chat_id__, orig_msg_id, files_to_db)
                     except Exception as e:
                         logger.error(f"ToolImageVisionFilter: DB sync failed: {e}")
 
@@ -263,7 +272,7 @@ class Filter:
                         continue
 
                     # Resolve to base64 for LLM perception
-                    base64_url = self.get_base64_from_file_id(f_id)
+                    base64_url = await self.get_base64_from_file_id(f_id)
                     if not base64_url:
                         logger.warning(f"ToolImageVisionFilter: Could not resolve base64 for {f_id}")
                         continue

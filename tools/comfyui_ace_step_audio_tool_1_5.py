@@ -7,6 +7,8 @@ author: Haervwe
 author_url: https://github.com/Haervwe/open-webui-tools/
 funding_url: https://github.com/Haervwe/open-webui-tools/
 version: 0.6.1
+required_open_webui_version: 0.9.1
+
 """
 
 import json

@@ -2,8 +2,9 @@
 title: Test Model Dropdown Pipe
 author: haervwe
 author_url: https://github.com/Haervwe/open-webui-tools
-version: 0.4.0
+version: 0.4.1
 license: MIT
+required_open_webui_version: 0.9.1
 description: >
     Test pipe: fetches active BASE models at import time and exposes them
     as a Literal valve dropdown in the Open WebUI settings UI.
@@ -34,8 +35,9 @@ def _fetch_base_model_ids() -> List[str]:
         from open_webui.models.models import Models  # type: ignore
 
         # IDs that have been explicitly deactivated in the DB
-        inactive_ids: set = {m.id for m in Models.get_base_models() if not m.is_active}
-        log.warning("[ModelDropdown] inactive_ids from DB: %s", inactive_ids)
+        # In 0.9.1+, Models.get_base_models() is async and cannot be called here at import time.
+        # We'll skip the inactive_ids check and rely on app.state.BASE_MODELS directly.
+        inactive_ids: set = set()
 
         base_models = getattr(app.state, "BASE_MODELS", None)
         if base_models:
