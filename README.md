@@ -11,7 +11,7 @@ Transform your Open WebUI instance into a powerful AI workstation with this comp
 
 ## ✨ What's Inside
 
-This repository contains **20+ specialized tools and functions** designed to enhance your Open WebUI experience:
+This repository contains **32+ specialized tools and functions** designed to enhance your Open WebUI experience:
 
 ### 🛠️ **Tools**
 
@@ -27,6 +27,18 @@ This repository contains **20+ specialized tools and functions** designed to enh
 - **ComfyUI Text-to-Video** - Generate short videos from text using ComfyUI (default WAN 2.2 workflow)
 - **Flux Kontext ComfyUI** - Professional image editing
 - **OpenWeatherMap Forecast Tool** - Interactive weather widget with current conditions and forecasts
+- **Ace Step CPP Audio Generator** - Direct CPP API music generation with VRAM management (New)
+- **ComfyUI Text-to-Image Tool** - Generate images from text using ComfyUI workflows (New)
+- **ComfyUI VibeVoice TTS Generator** - Speech synthesis with single and multi-speaker voice cloning (New)
+- **Equation Solver** - Symbolic and numerical equation solving with SymPy (New)
+- **Grokipedia Search** - Web scraping search for Grokipedia articles with full page retrieval (New)
+- **HF Papers** - Search Hugging Face Papers and fetch full papers as Markdown (New)
+- **IEEE Search** - Semantic search for IEEE papers with abstract viewing (New)
+- **Philosophy API** - GraphQL and REST search for philosophical content and thinkers (New)
+- **RPG Tool Set** - Interactive RPG companion with 3D dice rolling, character creation, and embeds (New)
+- **Semantic Scholar** - Research paper search with PDF download and recursive citation analysis (New)
+- **User Input Tool Set** - Interactive text input, choices, and images with multimodal support (New)
+- **Wikipedia Search** - Wikipedia search with page content retrieval and internal link navigation (New)
 
 ### 🔄 **Function Pipes**
 
@@ -111,29 +123,53 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 11. [ComfyUI ACE Step Audio Tool (Legacy)](#comfyui-ace-step-audio-tool-legacy)
 12. [ComfyUI Text-to-Video Tool](#comfyui-text-to-video-tool)
 13. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
-14. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
-15. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-16. [MiniMax LLM Pipe](#minimax-llm-pipe)
-17. [Planner Agent v3](#planner-agent-v3)
-18. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-19. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
-20. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-21. [Mopidy Music Controller](#mopidy-music-controller)
-22. [Letta Agent Pipe](#letta-agent-pipe)
-23. [Perplexica Pipe](#perplexica-pipe)
-24. [OpenRouter Image Pipe](#openrouter-image-pipe)
-25. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-26. [Doodle Paint Filter](#doodle-paint-filter)
-27. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-28. [Semantic Router Filter](#semantic-router-filter)
-29. [Full Document Filter](#full-document-filter)
-30. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-31. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-32. [Installation](#installation)
-33. [Contributing](#contributing)
-34. [License](#license)
-35. [Credits](#credits)
-36. [Support](#support)
+14. [ACE Step CPP Audio Generator](#ace-step-cpp-audio-generator)
+15. [ComfyUI Text-to-Image Tool](#comfyui-text-to-image-tool)
+16. [ComfyUI VibeVoice TTS Generator](#comfyui-vibevoice-tts-generator)
+17. [Equation Solver](#equation-solver)
+18. [Grokipedia Search](#grokipedia-search)
+19. [HF Papers](#hf-papers)
+20. [IEEE Search](#ieee-search)
+21. [Philosophy API](#philosophy-api)
+22. [RPG Tool Set](#rpg-tool-set)
+23. [Semantic Scholar](#semantic-scholar)
+24. [User Input Tool Set](#user-input-tool-set)
+25. [Wikipedia Search](#wikipedia-search)
+26. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
+27. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
+28. [MiniMax LLM Pipe](#minimax-llm-pipe)
+29. [Planner Agent v3](#planner-agent-v3)
+30. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+31. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
+32. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+33. [Mopidy Music Controller](#mopidy-music-controller)
+34. [Letta Agent Pipe](#letta-agent-pipe)
+35. [Perplexica Pipe](#perplexica-pipe)
+36. [OpenRouter Image Pipe](#openrouter-image-pipe)
+37. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+38. [Doodle Paint Filter](#doodle-paint-filter)
+39. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+40. [Semantic Router Filter](#semantic-router-filter)
+41. [Full Document Filter](#full-document-filter)
+42. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+31. [ACE Step CPP Audio Generator](#ace-step-cpp-audio-generator)
+32. [ComfyUI Text-to-Image Tool](#comfyui-text-to-image-tool)
+33. [ComfyUI VibeVoice TTS Generator](#comfyui-vibevoice-tts-generator)
+34. [Equation Solver](#equation-solver)
+35. [Grokipedia Search](#grokipedia-search)
+36. [HF Papers](#hf-papers)
+37. [IEEE Search](#ieee-search)
+38. [Philosophy API](#philosophy-api)
+39. [RPG Tool Set](#rpg-tool-set)
+40. [Semantic Scholar](#semantic-scholar)
+41. [User Input Tool Set](#user-input-tool-set)
+42. [Wikipedia Search](#wikipedia-search)
+43. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+44. [Installation](#installation)
+45. [Contributing](#contributing)
+46. [License](#license)
+47. [Credits](#credits)
+48. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -142,7 +178,7 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 
 ### Description
 
-Search arXiv.org for relevant academic papers on any topic. No API key required!
+Search arXiv.org for relevant academic papers and convert full papers to clean Markdown with LaTeX equation preservation. Works out of the box with no API key required!
 
 ### Configuration
 
@@ -150,13 +186,21 @@ Search arXiv.org for relevant academic papers on any topic. No API key required!
 
 ### Usage
 
-- **Example:**
+- **Paper Search:**
 
   ```python
-  Search for recent papers about "tree of thought"
+  Search for recent papers about "transformer attention mechanism"
   ```
 
-- Returns up to 5 most relevant papers, sorted by most recent.
+- **Full Paper Conversion:**
+
+  ```python
+  Get the full Markdown of arXiv paper 1706.03762 (Attention Is All You Need)
+  ```
+
+- Returns metadata including title, authors, abstract, published date, PDF link, and LaTeX source URL for each result.
+- The `get_paper_markdown` function converts papers to Markdown with full equation preservation (inline `$E = mc^2$` and block `$$...$$`), using LaTeX source with pandoc or falling back to PDF text extraction via PyMuPDF.
+- Handles multi-file LaTeX with `\input{}` resolution for complex papers.
 
 ![arXiv Search Example](img/arxiv_search.png)
 *Example arXiv search result in Open WebUI*
@@ -810,6 +854,406 @@ Tool that fetches weather forecasts using the OpenWeatherMap API and displays an
 
 ![OpenWeatherMap Forecast Tool](img/openweathermap_tool.png)
 *Example OpenWeatherMap Forecast Tool widget*
+
+---
+
+### ACE Step CPP Audio Generator
+
+### Description
+
+Generate music using the ACE Step 1.5 backend directly via CPP API. This tool supports advanced parameters like key, tempo, BPM, and language. It includes VRAM management through llama-swap model unloading for systems with limited GPU memory.
+
+### Configuration
+
+- `api_url` (str): Base URL for the ACE Step CPP API (default: `http://localhost:3000`)
+- `model_name` (str): Model checkpoint to use (default: `ace_step_1.5_turbo_aio.safetensors`)
+- `key` (str): Musical key (e.g., "C Major", "F# Minor")
+- `tempo` (int): BPM tempo for the generated track
+- `time_signature` (str): Time signature (e.g., "4/4")
+- `language` (str): Language for vocals (e.g., "en", "ja", "zh")
+- `unload_llama_swap_urls` (str): Comma-separated llama-swap URLs for VRAM management
+
+### Usage
+
+- **Example:**
+
+  ```python
+  Generate a "cyberpunk, darkwave" song in E minor, 140 BPM, 4/4 time signature
+  ```
+
+### Features
+
+- **Direct CPP API**: Uses the faster CPP backend instead of ComfyUI
+- **Advanced Parameters**: Full control over musical key, tempo, time signature, and language
+- **VRAM Management**: Automatic llama-swap model unloading to free GPU memory
+- **High Quality**: ACE Step 1.5 model for professional-grade audio output
+
+---
+
+### ComfyUI Text-to-Image Tool
+
+### Description
+
+Generate images from text prompts using ComfyUI with the Qwen Image workflow. Uses the ComfyUI HTTP + WebSocket API, supports unloading Ollama models before run, randomizes seed, and returns the generated image inline.
+
+### Configuration
+
+- `comfyui_api_url` (str): ComfyUI HTTP API endpoint (default: `http://localhost:8188`)
+- `workflow` (dict): Custom ComfyUI workflow JSON (default: bundled Qwen T2I workflow)
+- `max_wait_time` (int): Maximum wait time in seconds for job completion (default: `600`)
+- `unload_ollama_models` (bool): Unload Ollama models from VRAM before generating (default: `False`)
+- `ollama_api_url` (str): Ollama API URL for model management (default: `http://localhost:11434`)
+
+### Usage
+
+- **Example:**
+
+  ```python
+  Generate an image of "a serene mountain landscape at sunset"
+  ```
+
+### Features
+
+- **Qwen Image Workflow**: Uses Qwen Image model for text-to-image generation
+- **Seed Randomization**: Automatic seed randomization for varied outputs
+- **VRAM Management**: Optional Ollama model unloading before generation
+- **Inline Display**: Generated images are returned inline in chat
+
+---
+
+### ComfyUI VibeVoice TTS Generator
+
+### Description
+
+Generate speech using VibeVoice workflows via ComfyUI API. Supports both single speaker and multi-speaker (up to 4) voice cloning. The voice files must be pre-loaded in ComfyUI.
+
+### Configuration
+
+- `comfyui_api_url` (str): ComfyUI API endpoint (default: `http://localhost:8188`)
+- `workflow_type` (str): Workflow type - "single_speaker" or "multi_speaker" (default: `single_speaker`)
+- `diffusion_steps` (int): Number of diffusion steps for voice generation (default: `20`)
+- `cfg_scale` (float): CFG scale for generation (default: `1.3`)
+- `save_local` (bool): Save generated audio to Open WebUI storage (default: `True`)
+
+### Usage
+
+- **Single Speaker Example:**
+
+  ```python
+  Generate speech from "Hello, this is a test of the VibeVoice text-to-speech system."
+  ```
+
+- **Multi-Speaker Example:**
+
+  ```python
+  Generate multi-speaker dialogue with up to 4 voices
+  ```
+
+### Features
+
+- **Voice Cloning**: Both single and multi-speaker (up to 4) voice cloning
+- **Pre-loaded Voices**: Voice files pre-loaded in ComfyUI for fast generation
+- **Configurable Parameters**: Control diffusion steps, CFG scale, and more
+- **Audio Output**: Integrated audio playback and download links
+
+---
+
+### Equation Solver
+
+### Description
+
+Solve equations symbolically with SymPy or numerically with fsolve. Supports single equations, systems of equations, and both symbolic and numerical solutions.
+
+### Configuration
+
+- No API key or external configuration required. Uses local SymPy and SciPy libraries.
+
+### Usage
+
+- **Symbolic Example:**
+
+  ```python
+  Solve the equation "x^2 - 4 = 0" for variable "x"
+  ```
+
+- **System of Equations Example:**
+
+  ```python
+  Solve system "x + y = 10; 2x - y = 5" for variables "x, y"
+  ```
+
+- **Numerical Example:**
+
+  ```python
+  Solve numerically "x^3 - 2x + 1 = 0" for variable "x"
+  ```
+
+### Features
+
+- **Symbolic Solving**: Exact symbolic solutions using SymPy
+- **Numerical Solving**: Numerical approximations with fsolve for complex equations
+- **System Support**: Solve systems of equations with multiple variables
+- **No Dependencies**: Works locally without external API keys
+
+---
+
+### Grokipedia Search
+
+### Description
+
+Interface with Grokipedia (https://grokipedia.com) for web scraping. Provides search results, full page content retrieval, and internal link listing for navigation between connected Grokipedia pages.
+
+### Configuration
+
+- No configuration required. Works directly against grokipedia.com.
+
+### Usage
+
+- **Search Example:**
+
+  ```python
+  Search Grokipedia for "machine learning"
+  ```
+
+- **Full Page Example:**
+
+  ```python
+  Get full page content from Grokipedia article titled "Transformer Architecture"
+  ```
+
+### Features
+
+- **Web Scraping**: BeautifulSoup-based scraping of Grokipedia content
+- **Search Results**: Structured search results with title, URL, and snippet
+- **Full Page Retrieval**: Fetch complete article content
+- **Internal Links**: List internal links for page navigation
+
+---
+
+### HF Papers
+
+### Description
+
+Search Hugging Face Papers and fetch full papers as Markdown. Powered by the official HF Papers API with hybrid semantic and keyword search.
+
+### Configuration
+
+- No configuration required. Works directly against the HF Papers API.
+
+### Usage
+
+- **Search Example:**
+
+  ```python
+  Search HF Papers for "large language models"
+  ```
+
+- **Fetch Paper Example:**
+
+  ```python
+  Get full Markdown paper with ID "2401.12345"
+  ```
+
+### Features
+
+- **Hybrid Search**: Both semantic and keyword search capabilities
+- **Markdown Output**: Full paper content in clean Markdown format
+- **Truncation Handling**: Smart truncation for very long papers
+- **No API Key**: No API key required for access
+
+---
+
+### IEEE Search
+
+### Description
+
+Perform semantic search for IEEE papers and view abstracts from IEEE Xplore. No API keys required.
+
+### Configuration
+
+- No API keys required. Works directly against IEEE Xplore.
+
+### Usage
+
+- **Example:**
+
+  ```python
+  Search IEEE for papers on "neural networks" from 2020-2024
+  ```
+
+### Features
+
+- **No API Key**: Access IEEE papers without authentication
+- **Abstract Viewing**: View paper abstracts in search results
+- **Semantic Search**: Semantic search across IEEE Xplore
+- **Year Range Filtering**: Filter results by publication year
+
+---
+
+### Philosophy API
+
+### Description
+
+Interact with the Philosophy API using GraphQL and REST to search philosophical content, philosophers, ideas, and categories.
+
+### Configuration
+
+- No configuration required. Uses default Philosophy API endpoints.
+
+### Usage
+
+- **Example:**
+
+  ```python
+  Search Philosophy API for "ethics"
+  ```
+
+### Features
+
+- **GraphQL & REST**: Dual API access via GraphQL queries and REST endpoints
+- **Multi-Entity Search**: Search philosophers, ideas, categories, and more
+- **Backup URLs**: Automatic fallback to backup API endpoints
+- **No API Key**: No authentication required
+
+---
+
+### RPG Tool Set
+
+### Description
+
+Interactive RPG companion with 3D dice rolling overlays, character creation forms, and rich glassmorphism embeds. Uses CSS 3D transforms for animated dice and event_call for interactive overlays.
+
+### Configuration
+
+- No configuration required. Fully interactive via HTML embeds.
+
+### Usage
+
+- **Dice Roll Example:**
+
+  ```python
+  Roll 2d20+5 for an attack roll
+  ```
+
+- **Character Creation Example:**
+
+  ```python
+  Create a new D&D character
+  ```
+
+### Features
+
+- **3D Dice Rolling**: Animated CSS 3D dice with overlay
+- **Dice Notation**: Support for complex dice notation (e.g., "4d6-2", "1d100+1d4+3")
+- **Character Forms**: Interactive character creation and management
+- **Glassmorphism UI**: Modern glassmorphism-style embeds
+- **Image Generation**: Integrated image generation for RPG content
+
+---
+
+### Semantic Scholar
+
+### Description
+
+Perform search for relevant papers on Semantic Scholar, covering journals like IEEE, Nature, and top ML conferences/journals. Includes PDF download and analysis capabilities where open access is available, with image extraction and recursive citation search.
+
+### Configuration
+
+- No API key required. Works with the free Semantic Scholar API.
+
+### Usage
+
+- **Example:**
+
+  ```python
+  Search Semantic Scholar for "transformer models"
+  ```
+
+### Features
+
+- **Multi-Source**: Covers IEEE, Nature, ION, and top ML conference papers
+- **PDF Download**: Download and read open-access PDFs with PyMuPDF
+- **Image Extraction**: Extract images from papers
+- **Recursive Citations**: Follow citation chains for comprehensive research
+
+---
+
+### User Input Tool Set
+
+### Description
+
+Interactive tools for text input, choices, and images with ultra-rounded Open WebUI styling. Optimized for agent vision (multimodal LLM perception).
+
+### Configuration
+
+- No configuration required. Interactive UI elements are generated dynamically.
+
+### Usage
+
+- **Text Input Example:**
+
+  ```python
+  Ask the user for their name
+  ```
+
+- **Choices Example:**
+
+  ```python
+  Give the user options: "Option A", "Option B", "Option C"
+  ```
+
+- **Image Input Example:**
+
+  ```python
+  Ask the user to upload an image
+  ```
+
+### Features
+
+- **Ultra-Rounded Styling**: Modern high-contrast UI with ultra-rounded elements
+- **Multimodal Support**: Optimized for multimodal LLM perception
+- **Interactive Modals**: Text input, choice selection, and image upload modals
+- **Base64 Integration**: Seamless base64 image handling
+
+---
+
+### Wikipedia Search
+
+### Description
+
+Search Wikipedia and retrieve page content with full link navigation. Uses the wikipedia-api library with custom User-Agent headers to prevent 403 Forbidden errors from Wikipedia. Supports three functions: search, page retrieval, and internal link listing for deep navigation.
+
+### Configuration
+
+- No API key or external configuration required. Uses the public Wikipedia API.
+
+### Usage
+
+- **Search Example:**
+
+  ```python
+  Search Wikipedia for "artificial intelligence"
+  ```
+
+- **Full Page Example:**
+
+  ```python
+  Get the Wikipedia page "Artificial intelligence"
+  ```
+
+- **List Internal Links Example:**
+
+  ```python
+  List internal Wikipedia links on the "Artificial intelligence" page
+  ```
+
+### Features
+
+- **Search + Page Fetch**: Two-step process (search results first, then fetch specific page) for precise article retrieval
+- **Internal Link Navigation**: List all internal Wikipedia links on a page for deep navigation through related topics
+- **Snippet Cleaning**: HTML-cleaned snippets using BeautifulSoup
+- **Rate Limit Safe**: Custom User-Agent headers prevent 403 errors from Wikipedia
+- **No Dependencies**: Works without any API keys
 
 ---
 
