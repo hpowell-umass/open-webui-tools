@@ -3,7 +3,7 @@ title: Cloudflare Workers AI Image Generator
 author: tan-yong-sheng
 author_url: https://github.com/tan-yong-sheng
 description: Generate images using Cloudflare Workers AI text-to-image models with preprocessing for different model types
-version: 1.1.1
+version: 1.1.2
 license: MIT
 requirements: aiohttp
 """
@@ -385,10 +385,10 @@ class Tools:
                     headers={"content-type": "image/jpeg"},
                 )
                 current_user = (
-                    Users.get_user_by_id(__user__["id"]) if __user__ else None
+                    await Users.get_user_by_id(__user__["id"]) if __user__ else None
                 )
 
-                file_item = upload_file_handler(
+                file_item = await upload_file_handler(
                     __request__,
                     file=upload_file,
                     metadata={},

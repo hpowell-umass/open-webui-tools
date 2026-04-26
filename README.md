@@ -30,17 +30,19 @@ This repository contains **20+ specialized tools and functions** designed to enh
 
 ### 🔄 **Function Pipes**
 
-- **Planner Agent v2** - Advanced autonomous agent with specialized models, interactive guidance, and comprehensive execution management
+- **Planner Agent v3** - Advanced autonomous agent with agentic planning, multi-agent delegation, and real-time visual execution tracking
 - **arXiv Research MCTS** - Advanced research with Monte Carlo Tree Search
-- **Multi Model Conversations** - Multi-agent discussions
+- **Multi Model Conversations v2** - Multi-agent discussions with interactive UI, tool support, and improved reasoning handling
 - **Resume Analyzer** - Professional resume analysis
 - **Mopidy Music Controller** - Music server management
 - **Letta Agent** - Autonomous agent integration
 - **Perplexica Pipe** - AI-powered web search with streaming responses and citations
 - **Google Veo Text-to-Video & Image-to-Video** - Generate videos from text or a single image using Google Veo (only one image supported as input)
+- **MiniMax LLM Pipe** - Route chat completions to MiniMax's OpenAI-compatible API with M2.7 and M2.7-highspeed models (204K context)
 
 ### 🔧 **Filters**
 
+- **Doodle Paint** - Toggleable filter that opens a paint canvas before sending each message
 - **Prompt Enhancer** - Automatic prompt improvement
 - **Semantic Router** - Intelligent model selection
 - **Full Document** - File processing capabilities
@@ -111,25 +113,27 @@ Most tools are designed to work with minimal configuration. Key configuration ar
 13. [OpenWeatherMap Forecast Tool](#openweathermap-forecast-tool)
 14. [Flux Kontext ComfyUI Pipe](#flux-kontext-comfyui-pipe)
 15. [Google Veo Text-to-Video & Image-to-Video Pipe](#google-veo-text-to-video--image-to-video-pipe)
-16. [Planner Agent v2](#planner-agent-v2)
-17. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
-18. [Multi Model Conversations Pipe](#multi-model-conversations-pipe)
-19. [Resume Analyzer Pipe](#resume-analyzer-pipe)
-20. [Mopidy Music Controller](#mopidy-music-controller)
-21. [Letta Agent Pipe](#letta-agent-pipe)
-22. [Perplexica Pipe](#perplexica-pipe)
-23. [OpenRouter Image Pipe](#openrouter-image-pipe)
-24. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
-25. [Prompt Enhancer Filter](#prompt-enhancer-filter)
-26. [Semantic Router Filter](#semantic-router-filter)
-27. [Full Document Filter](#full-document-filter)
-28. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
-29. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
-30. [Installation](#installation)
-31. [Contributing](#contributing)
-32. [License](#license)
-33. [Credits](#credits)
-34. [Support](#support)
+16. [MiniMax LLM Pipe](#minimax-llm-pipe)
+17. [Planner Agent v3](#planner-agent-v3)
+18. [arXiv Research MCTS Pipe](#arxiv-research-mcts-pipe)
+19. [Multi Model Conversations v2 Pipe](#multi-model-conversations-v2-pipe)
+20. [Resume Analyzer Pipe](#resume-analyzer-pipe)
+21. [Mopidy Music Controller](#mopidy-music-controller)
+22. [Letta Agent Pipe](#letta-agent-pipe)
+23. [Perplexica Pipe](#perplexica-pipe)
+24. [OpenRouter Image Pipe](#openrouter-image-pipe)
+25. [OpenRouter WebSearch Citations Filter](#openrouter-websearch-citations-filter)
+26. [Doodle Paint Filter](#doodle-paint-filter)
+27. [Prompt Enhancer Filter](#prompt-enhancer-filter)
+28. [Semantic Router Filter](#semantic-router-filter)
+29. [Full Document Filter](#full-document-filter)
+30. [Clean Thinking Tags Filter](#clean-thinking-tags-filter)
+31. [Using the Provided ComfyUI Workflows](#using-the-provided-comfyui-workflows)
+32. [Installation](#installation)
+33. [Contributing](#contributing)
+34. [License](#license)
+35. [Credits](#credits)
+36. [Support](#support)
 ---
 
 ## 🧪 Tools
@@ -519,7 +523,6 @@ AI-powered web search using Perplexica with streaming responses, intelligent cit
 
 ![Perplexica Pipe Example](img/Perplexica_pipe.png)
 *Example of Perplexica pipe search results with citations in Open WebUI*
-
 ---
 
 ### ComfyUI Image-to-Image Tool (Qwen Image Edit 2509)
@@ -888,6 +891,40 @@ Prompt: "Edit this image to look like a medieval fantasy king, preserving facial
 
 ---
 
+### MiniMax LLM Pipe
+
+### Description
+
+Route chat completions to [MiniMax](https://platform.minimaxi.com)'s OpenAI-compatible API (`api.minimax.io/v1`) directly from Open WebUI. This pipe exposes MiniMax-M2.7 and MiniMax-M2.7-highspeed models (both with 204K context windows) as selectable models in your Open WebUI instance.
+
+### Configuration
+
+- `MINIMAX_API_KEY` (str): Your MiniMax API key (required, get one at https://platform.minimaxi.com)
+- `ENABLED_MODELS` (list): Which MiniMax models to expose (default: all)
+- `STRIP_THINKING` (bool): Strip `<think>…</think>` blocks from responses (default: `True`)
+- `DEFAULT_TEMPERATURE` (float): Default temperature when none is specified, 0.01–1.0 (default: `0.7`)
+
+**Prerequisites**: Get a MiniMax API key from [MiniMax Platform](https://platform.minimaxi.com).
+
+### Usage
+
+1. **Install the pipe**: Copy `functions/minimax_pipe.py` into Open WebUI via Workspace > Functions
+2. **Configure**: Set your `MINIMAX_API_KEY` in the pipe's Valves settings
+3. **Select model**: Choose "MiniMax M2.7" or "MiniMax M2.7 Highspeed" from the model dropdown
+4. **Start chatting**: The pipe streams responses directly from the MiniMax API
+
+### Features
+
+- **OpenAI-Compatible Routing**: Uses MiniMax's `/v1/chat/completions` endpoint
+- **Two Models**: MiniMax-M2.7 (full) and MiniMax-M2.7-highspeed (faster) — both with 204K context
+- **Streaming**: Real-time streamed responses via `chat:message:delta` events
+- **Temperature Clamping**: Automatically clamps temperature to MiniMax's accepted range (0.01–1.0)
+- **Think-Tag Stripping**: Strips `<think>…</think>` reasoning blocks from output (configurable)
+- **Parameter Forwarding**: Passes `max_tokens`, `top_p`, and other parameters to the API
+
+
+---
+
 ### Google Veo Text-to-Video & Image-to-Video Pipe
 
 ### Description
@@ -941,99 +978,92 @@ Generate high-quality videos from text prompts or a single image using Google Ve
 
 ---
 
-### Planner Agent v2
+### Planner Agent v3
 
-**Advanced autonomous agent with specialized model support, interactive user guidance, and comprehensive execution management.**
+**Advanced autonomous agent with agentic planning, multi-agent delegation, and real-time visual execution tracking.**
 
-This powerful agent autonomously generates and executes multi-step plans to achieve complex goals. It's a generalist agent capable of handling any text-based task, making it ideal for complex requests that would typically require multiple prompts and manual intervention.
+The Planner Agent v3 is a state-of-the-art autonomous system designed for Open WebUI. It transforms complex user requests into structured, executable plans, delegating specialized tasks to a fleet of subagents while providing interactive feedback and visual progress updates.
 
 ### 🚀 Key Features
 
-* **🧠 Intelligent Planning:** Automatically breaks down goals into actionable steps with dependency mapping
-* **🎨 Specialized Models:** Dedicated models for writing (WRITER_MODEL), coding (CODER_MODEL), and tool usage (ACTION_MODEL) with automatic routing
-* **🔍 Quality Control:** Real-time output analysis with quality scoring (0.0-1.0) and iterative improvement
-* **🎭 Interactive Error Handling:** When actions fail or produce low-quality outputs, the system pauses and prompts you with options: retry with custom guidance/instructions, retry as-is, approve current output despite warnings, or abort the entire plan execution
-* **📊 Live Progress:** Real-time Mermaid diagrams with color-coded status indicators
-* **🧩 Template System:** Final synthesis using `{{action_id}}` placeholders for seamless content assembly
-* **🔧 Native Tool Integration:** Automatically discovers and uses all available Open WebUI tools
-* **⚡ Advanced Features:** Lightweight context mode, concurrent execution, cross-action references (`@action_id`), and comprehensive validation
-* **🔮 MCP(OpenAPI servers) Support:** Model Context Protocol integration coming soon for extended tool capabilities
+* **🧠 Agentic Planning & Self-Correction:** Automatically decomposes high-level goals into a dependency-aware task tree with user-in-the-loop approval and adaptive rescheduling.
+* **⚡ Parallel Execution (v15+):** Blazing fast performance via concurrent execution of tool calls and subagent tasks using `asyncio.gather`. This allows multiple independent tasks to be performed simultaneously.
+* **📂 Robust State Persistence:** Automatically saves and recovers task states, results, and subagent histories across chat turns via attached JSON files.
+* **🔌 Native OWUI Integration:**
+    - **User Skills**: Automatically resolves and injects available skills for the model (Planner and Custom Workspace models) for it to query them.
+    - **Knowledge Bases & RAG**: Direct integration with OWUI knowledge bases, notes, and user memory via the `knowledge_agent`.
+    - **Custom Functions & Tools**: Full support for user-created Python tools, imported tools, and external OpenAPI/DB tools.
+    - **MCP Servers**: Extended support for Model Context Protocol (MCP) servers with connection deduplication and resilience.
+    - **Terminal Integration**: Full interactive terminal access for shell-based tasks and file management (requires `terminal_agent`).
+    - **Native Tool Parity**: Intelligently inherits built-in tool capabilities (Web Search, Image Gen, etc.) when specialized subagents are disabled.
+* **🌐 Specialized Built-in Subagents:**
+    - **Web Search Agent**: Autonomous research with source synthesis and citation handling.
+    - **Image Gen Agent**: High-quality creation using OWUI's native image middleware.
+    - **Knowledge Agent**: Context-aware RAG from your documents and user memory.
+    - **Code Interpreter Agent**: Secure Python execution for data science and automation.
+    - **Terminal Agent**: Direct system access for technical task execution.
+* **🛠️ MCP Resilience System:** Full Model Context Protocol (MCP) support with built-in parallelism patches and connection deduplication to prevent deadlocks.
+* **🎭 Interactive UI Modals:** Native UI components for `ask_user`, `give_options`, and `plan_approval` allow the agent to request clarification or confirmation.
+* **📊 Visual Execution Tracker:** Real-time HTML interface showing live task status (Pending, In-Progress, Completed, Failed).
 
-### ⚙️ Configuration
+### ⚙️ Configuration (Valves)
 
-**Core Models:**
+> [!IMPORTANT]
+> **Model ID & Feature Configuration**
+> - **Base Models**: Found in **Admin Panel > Settings > Models**. These are the raw model IDs (e.g., `qwen2.5:7b`, `gpt-4o`).
+>     - **Essential for**: `PLANNER_MODEL` (Mandatory).
+>     - **Fallback Support**: `REVIEW_MODEL`, `TERMINAL_AGENT_MODEL`, and all **Virtual Agent Models** will fallback to the `PLANNER_MODEL` if left blank. However, if specified, they **must** be Base Models (not workspace presets).
+> - **Workspace Models (Presets)**: Found in **Workspace > Models**. These are custom presets with specific personas and settings.
+>     - **Used for**: `SUBAGENT_MODELS`. This is where you configure specific **Knowledge Base access**, custom tool features, skills, and specialized system prompts for your subagents.
 
-- `MODEL`: Main planning LLM
-- `ACTION_MODEL`: Tool-based actions and general tasks  
-- `WRITER_MODEL`: Creative writing and documentation
-- `CODER_MODEL`: Code generation and development
+#### Parallel Execution (New)
+Planner Agent v3 supports parallel execution of tool calls and subagent calls. This significantly improves performance when multiple independent tasks can be performed simultaneously.
 
-**Temperature Controls:**
+- **`PARALLEL_TOOL_EXECUTION`**: When enabled, the planner executes all identified tool calls (including subagent calls) in parallel.
+- **`PARALLEL_SUBAGENT_EXECUTION`**: When enabled, subagents execute their internal tool calls (search, code interpreter, etc.) in parallel.
 
-- `PLANNING_TEMPERATURE` (0.8): Planning creativity
-- `ACTION_TEMPERATURE` (0.7): Tool execution precision
-- `WRITER_TEMPERATURE` (0.9): Creative writing freedom
-- `CODER_TEMPERATURE` (0.3): Code generation accuracy
-- `ANALYSIS_TEMPERATURE` (0.4): Output analysis precision
-
-**Execution Settings:**
-
-- `MAX_RETRIES` (3): Retry attempts per action
-- `CONCURRENT_ACTIONS` (1): Parallel processing limit
-- `ACTION_TIMEOUT` (300): Individual action timeout
-- `SHOW_ACTION_SUMMARIES` (true): Detailed execution summaries
-- `AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT` (false): AI-enhanced requirements
-
-### 💡 Usage Examples
-
-
-**Multi-Media Content:**
-
-```
-search the latest AI news and create a song based on that, with that , search for stock images to use a “album cover” and create a mockup of the spotify in a plain html file with vanilla js layout using those assets embeded for interactivity
-```
-
-![Planner Agent Example](img/planner_2.png)
-*Example of Planner Agent in action Using Gemini 2.5 flash and local music generation*
+> [!WARNING]
+> Parallel execution may lead to external race conditions if tools have stateful dependencies within the same turn (e.g., one tool depends on a file created by another tool in the same turn). Use with caution for complex, inter-dependent workflows. Most standard search and generation tasks are independent and safe for parallelism.
+> Subagents interdependance of task and Async state for the pipe is heavily guarded and safe. but you are responsible for the effects it migh have on external services.
+> If you go for full paralellisim you might need to use an async db to avoid deadlocks and slowdowns with a large amount of SubAgents
 
 
-**Creative Writing:**
+#### Model & Subagent Setup
+- **`PLANNER_MODEL`**: The primary "brain" model for planning and orchestration (Mandatory).
+- **`SUBAGENT_MODELS`**: Comma-separated list of specialized models or **Workspace Model presets** for delegation. Best for Knowledge Base access and custom personas.
+- **`WORKSPACE_TERMINAL_MODELS`**: List of model IDs allowed to use the local terminal environment, overriding the default virtual terminal agent check.
+- **`SUBAGENT_TIMEOUT`**: Global timeout for subagent and MCP tool calls to prevent bottlenecks.
 
-```
-create an epic sci fi Adult novel based on the current trends on academia news and social media about AI and other trending topics, with at least 10 chapters, well crafter world with rich characters , save each chapter in a folter named as the novel in obsidian with an illustration
-```
+#### Interaction & Control
+- **`ENABLE_PLAN_APPROVAL`**: Pause for user review before starting any tasks.
+- **`YOLO_MODE`**: Fully autonomous mode: disables iteration limits and confirmation gates.
+- **`TASK_ITERATION_LIMIT`**: Global safety cap to prevent infinite agentic loops.
+- **`ENABLE_USER_INPUT_TOOLS`**: Toggle availability of interactive UI modals (`ask_user`, `give_options`).
 
-![Planner Agent Example](img/planner_3.png)
-*Example of Planner Agent in action Using Gemini 2.5 flash and local image generation, local saving to obsidian and websearch*
+#### 🔄 Tool Inheritance & Virtual Agents
+The Planner V3 features a smart tool inheritance logic:
+- **Delegation Mode**: If a Virtual Agent (e.g., `web_search_agent`) is **enabled** in the Planner Valves, the planner will delegate tasks to that specialized subagent using its own configuration.
+- **Inherent Mode**: If a Virtual Agent is **disabled**, the Planner itself "inherits" those capabilities (if the Planner's Base Model/Admin tool settings allow it) and performs the task directly without delegation.
 
+### 💡 Visual Walkthrough
 
-**Interactive Error Recovery:**
-The Planner Agent features intelligent error handling that engages with users when actions fail or produce suboptimal results. When issues occur, the system pauses execution and presents you with interactive options:
+![Planner V3 Demo](img/planner_v3_final_result_screencast.gif)
+*Screencast of Planner V3 in action: Automated planning, subagent execution, and final multi-media synthesis.*
 
-- **Retry with Guidance:** Provide custom instructions to help the agent understand what went wrong and how to improve
-- **Retry As-Is:** Attempt the action again without modifications
-- **Approve Output:** Accept warning-level outputs despite quality concerns
-- **Abort Execution:** Stop the entire plan if the issue is critical
+![Live Execution](img/planner_v3_live_execution.png)
+*Real-time monitoring of subagent tasks and planning progress.*
 
-```
-Example scenario: If an action fails to generate proper code or retrieve expected data, 
-you'll be prompted to either provide specific guidance ("try using a different approach") 
-or decide whether to continue with the current output.
-```
+![Configuration Valves](img/planner_v3_configuration_valves.png)
+*Extensive configuration options to tailor the agentic behavior.*
 
-![Planner Agent Example](img/planner_error.png)
-*Interactive error recovery dialog showing user options when an action encounters issues during plan execution*
+![Interactive Give Options](img/planner_v3_interactive_give_options.png)
+*Autonomous agents requesting user choice through interactive UI modals.*
 
+![Detailed Thought Trace](img/planner_v3_detailed_thought_trace.png)
+*Deep visibility into the agent's reasoning process and tool interactions.*
 
-
-**Technical Development:**
-
-```
-Create a fully-featured Conway's Game of Life SPA with responsive UI, game controls, and pattern presets using vanilla HTML/CSS/JS
-```
-
-![Planner Agent Example](img/planner.png)
-*Example of Planner Agent in action Using local Hermes 8b (previous verision of the script)*
+![Task Completion and Media Player](img/planner_v3_task_completion_media_player.png)
+*Final output synthesis leveraging specialized subagents (e.g., Music Generation & HTML Layout).*
 
 ---
 
@@ -1070,44 +1100,55 @@ Search arXiv.org for relevant academic papers and iteratively refine a research 
 
 ---
 
-### Multi Model Conversations Pipe
+### Multi Model Conversations v2 Pipe
 
 ### Description
 
-Simulate conversations between multiple language models, each acting as a distinct character. Configure up to 5 participants with unique personas, models, and behaviors. This pipe enables engaging multi-agent discussions, debates, and collaborative problem-solving scenarios.
+An advanced multi-model conversation system that enables interactive, multi-agent discussions with a custom configuration UI. Feature parity with the latest Open WebUI capabilities including tool support, reasoning tag handling (thinking blocks), and dynamic speaker management. Configure up to 5 participants with unique personas and models, and use the optional Group Chat Manager to orchestrate the discussion flow.
 
 ### Configuration
 
-This pipe features **User Valves** - configurable settings that are unique per user and can be customized for each individual chat session. This means each user can have their own conversation setups, and different chats can have different participant configurations.
+Version 2 introduces a sophisticated **Configuration Overlay** that allows you to set up your multi-agent conversation visually. It still supports **User Valves** for defaults, but the primary way to configure a chat is through the interactive UI.
+
+**Key Features:**
+
+- **Dynamic Speaker Selection**: Enables or disables the Group Chat Manager.
+- **Model-Specific Prompts**: Set unique system messages for each participant.
+- **Tool Integration**: Models can now use available tools within the conversation.
+- **Reasoning Support**: Full support for "thinking" models with collapsible reasoning blocks.
 
 **Core Settings:**
 
-- `number_of_participants`: Set the number of participants (1-5)
-- `rounds_per_user_message`: How many rounds of replies before the user can send another message
+- `NUM_PARTICIPANTS`: Set the number of participants (1-5)
+- `ROUNDS_PER_CONVERSATION`: Total rounds of replies in the conversation
+- `UseGroupChatManager`: Enable dynamic speaker selection by a manager model
 
-**Per-Participant Configuration (for each of the 5 participants):**
+**Per-Participant Configuration:**
 
-- `participant_[1-5]_model`: Model for each participant (e.g., qwen3:14b, gpt-4, claude-3)
-- `participant_[1-5]_alias`: Display name for each participant (e.g., "Optimist", "Skeptic")
-- `participant_[1-5]_system_message`: Persona and instructions for each participant
-- `all_participants_appended_message`: Global instruction appended to each prompt
+- `Participant[1-5]Model`: Model for each participant
+- `Participant[1-5]Alias`: Display name for each participant
+- `Participant[1-5]SystemMessage`: Persona and instructions for each participant
 
-**Model Parameters:**
+### Accessing the Configuration UI
 
-- `temperature`, `top_k`, `top_p`: Standard model parameters for generation control
+To configure the conversation:
 
-### Accessing User Valves
+1. **Select the Pipe**: Choose "Multi Model Conversations v2 Pipe" as your model.
+2. **Open Configuration**: Click the **settings icon** (list icon in a new message) in the chat input area OR look for the **Configuration Overlay** that appears when starting a new chat.
+3. **Configure agents**: Set your models, aliases and system prompts.
+4. **Save and Start**: Click "Start Conversation" to begin the multi-agent session.
 
-To configure the conversation participants and settings:
-
-1. **In the new chat interface:** Click the settings icon (gear icon) in the chat input area
-2. A "Valves" panel will open showing all configurable parameters
-3. Adjust the number of participants, models, aliases, and system messages
-4. Each chat can have its own unique configuration
-5. Settings are saved per-chat, allowing you to maintain different conversation setups
-
-![Multi Model Conversation Valves](img/conversations.png)
+![Multi Model Conversation Valves](img/conversation_user_valves.png)
 *Example of Multi Model Conversations User Valves configuration panel*
+
+![Conversations Setup Popup](img/conversations_setup_popup.png)
+*Example of Multi Model Conversations Setup Popup*
+
+### Video Demos
+
+![Conversation v2 Demo 1](img/conversations_v2_1.gif)
+
+![Conversation v2 Demo 2](img/conversations_v2_2.gif)
 
 ### Usage
 
@@ -1318,6 +1359,40 @@ Example: [nytimes.com](https://nytimes.com/some-page).
 The filter processes annotations in the response stream and emits citation events with source URLs, titles, and metadata for each web search result.
 
 ## 🔧 Filters
+
+### Doodle Paint Filter
+
+### Description
+
+Toggleable filter that opens a paint canvas before sending each message, letting you attach a hand-drawn sketch to your prompt. Perfect for visually explaining concepts, requesting changes to UI drafts, or adding a personal touch to your AI interactions.
+
+### Features
+
+- **Integrated Canvas**: Opens a sleek, fullscreen paint canvas directly within your Open WebUI space.
+- **Rich Tools**: Includes a pen, eraser, color palette, custom color picker, brush size adjustment, clear canvas, and undo/redo functionality.
+- **Native Persistence**: Uses Open WebUI's native `Chats` model so generated doodles permanently attach to the user's message body, persisting seamlessly across the entire conversation history instead of as hacky assistant attachments.
+
+### Usage
+
+1. **Enable the Filter**: Turn on the Doodle Paint filter within your model configuration or parameters.
+2. **Send a Message**: Type your message and hit send.
+3. **Draw**: A beautiful fullscreen Doodle Paint canvas will automatically appear. Draw your sketch!
+4. **Attach**: Click **✔ Attach & Send** to append the drawing to your message (or "Skip" to send text-only).
+
+
+![Doodle Paint Prompt](img/doodle_paint_prompt.png)
+*Sending a promt triggers the doodle paint canvas if active*
+
+
+![Doodle Paint Canvas](img/doodle_paint_popup.png)
+*Fullscreen paint canvas overlay*
+
+
+
+![Doodle Paint Result](img/doodle_paint_result.png)
+*Final interaction with the AI model*
+
+---
 
 ### Prompt Enhancer Filter
 
