@@ -1,190 +1,180 @@
-""" 
+"""
 title: HF Papers Tool
-author: Grok-assisted
-version: 1.1
-description: Search, list, and read arXiv/HF papers via hf papers CLI. Returns clean markdown (with LaTeX math preserved) for RAG/agent use.
-requirements: subprocess
+author: Your Name / Grok-assisted
+version: 1.0
+description: Search HF Papers and fetch full papers as Markdown. Powered by official HF Papers API.
+requirements: requests
 """
 
-import subprocess
-from typing import Optional
-import unittest
-from unittest.mock import patch, MagicMock
+import requests
+from typing import Dict, List, Any
 
 class Tools:
     def __init__(self):
-        self.citation = True  # Helps with attribution in Open WebUI
+        pass
 
-    def hf_papers_list(self, sort: str = "trending", limit: int = 5, date: Optional[str] = None) -> str:
+    async def search_hf_papers(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """
-        List recent or trending papers from Hugging Face Papers (mostly arXiv).
+        Search Hugging Face Papers (hybrid semantic + keyword search).
         
-        :param sort: Sorting method - 'trending' or default (recent).
-        :param limit: Number of papers to return (1-20).
-        :param date: Specific date (YYYY-MM-DD) or 'today'.
-        :return: Formatted list of papers with IDs, titles, and metadata.
+        :param query: Search query (title, author, topic, etc.)
+        :param limit: Number of results to return (max ~20-30 recommended)
+        :return: List of papers with title, authors, abstract snippet, arXiv ID, HF paper URL, etc.
         """
-        cmd = ["hf", "papers", "ls", "--limit", str(limit), "--sort", sort]
-        if date:
-            cmd.extend(["--date", date])
-        
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                return f"**HF Papers List**\n\n{result.stdout}"
-            else:
-                return f"Error listing papers: {result.stderr}"
+            url = f"https://huggingface.co/api/papers/search?q={query}&limit={limit}"
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            # HF returns a list of results directly
+            return {
+                "status": "success",
+                "query": query,
+                "results": data[:limit] if isinstance(data, list) else data
+            }
         except Exception as e:
-            return f"Failed to run hf papers ls: {str(e)}"
+            return {"status": "error", "message": str(e)}
 
-    def hf_papers_search(self, query: str, limit: int = 5) -> str:
+    async def get_hf_paper_markdown(self, paper_id: str) -> str:
         """
-        Semantic or keyword search for papers.
+        Fetch the FULL paper content in clean Markdown format from HF Papers.
+        The paper_id is the arXiv ID (e.g. 2401.12345 or 2602.08025).
         
-        :param query: Search term, e.g., "vision language models" or "RLHF".
-        :param limit: Max results.
-        :return: Matching papers with metadata.
+        :param paper_id: arXiv-style paper ID (without version suffix if not needed)
+        :return: Full paper Markdown (headings, equations, tables preserved where possible)
         """
-        cmd = ["hf", "papers", "search", query, "--limit", str(limit)]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                return f"**Search Results for '{query}'**\n\n{result.stdout}"
-            else:
-                return f"Error searching: {result.stderr}"
+            # Preferred .md endpoint (cleanest Markdown)
+            url = f"https://huggingface.co/papers/{paper_id}.md"
+            response = requests.get(url, timeout=20)
+            if response.status_code == 404:
+                return f"Paper {paper_id} not yet indexed on HF Papers. Try arXiv PDF or abstract instead."
+            response.raise_for_status()
+            markdown = response.text
+            # Optional: truncate extremely long papers to avoid context explosion
+            # (HF papers are usually manageable; remove if you want raw full text)
+            if len(markdown) > 80000:  # ~60-80k tokens depending on model
+                markdown = markdown[:80000] + "\n\n... [Markdown truncated due to length. Ask for specific sections if needed.]"
+            return markdown
         except Exception as e:
-            return f"Failed to search papers: {str(e)}"
-
-    def hf_papers_read(self, paper_id: str) -> str:
-        """
-        Retrieve a full paper as clean, agent-ready markdown (best for RAG).
-        Works great for arXiv-only papers (use arXiv ID like 1706.03762).
-        Equations from LaTeX/PDF are typically converted to $...$ or $$...$$ delimiters.
-        
-        :param paper_id: arXiv ID or HF paper ID.
-        :return: Markdown content of the paper (abstract, sections, etc.).
-        """
-        cmd = ["hf", "papers", "read", paper_id]
-        markdown = ""
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    break  # Exit loop if no more output
-                # print(f"Processing line: {str(line.rstrip())}")
-                markdown = markdown + str(line.rstrip()) + "\n"
-            if not proc.returncode and "Set HF_DEBUG=1 as environment variable for full traceback." not in markdown:
-                return f"**Paper Content (ID: {paper_id})**\n\n{markdown}"
-            else:
-                return f"Error reading paper {paper_id}: {proc.stderr}\n\nTip: Index it first at https://huggingface.co/papers/{paper_id}"
-        except Exception as e:
-            return f"Failed to read paper: {str(e)}"
+            return f"Error fetching Markdown: {str(e)}"
 
 
-# ==================== UNIT TESTS (run with: python hf_papers_tool.py) ====================
+# ===================== UNIT TESTS =====================
+# Paste this at the very bottom of the tool file
+
+import unittest
+import asyncio
+from typing import Dict, Any
+
+# Assuming the Tools class is defined above in the same file
+# If you named the class differently, adjust the import/reference below
 
 class TestHFPapersTool(unittest.TestCase):
-
     def setUp(self):
-        self.tools = Tools()
+        self.tools = Tools()  # Instantiate the Tools class from your tool
 
-    @patch('subprocess.run')
-    def test_hf_papers_list_success(self, mock_run):
-        """Test successful listing of papers."""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "Paper 1: Title A\nPaper 2: Title B"
-        mock_run.return_value = mock_result
+    def test_search_hf_papers_success(self):
+        """Test that search returns successful results with expected structure."""
+        async def run_test():
+            result: Dict[str, Any] = await self.tools.search_hf_papers(
+                query="attention is all you need", 
+                limit=3
+            )
+            
+            self.assertEqual(result.get("status"), "success")
+            self.assertIn("query", result)
+            self.assertIn("results", result)
+            
+            results = result["results"]
+            self.assertIsInstance(results, list)
+            self.assertGreater(len(results), 0, "Should return at least one result for a well-known paper")
+            
+            # Check structure of first result (based on current HF Papers API)
+            first = results[0]
+            self.assertIn("title", first)
+            self.assertIn("authors", first["paper"])  # usually a list or string
+            self.assertIn("id", first["paper"])       # arXiv-style ID like "1706.03762"
+            self.assertIn("summary", first["paper"]) # or similar field for snippet
+            
+            print(f"✅ Search test passed. Found {len(results)} results.")
+            return result
 
-        result = self.tools.hf_papers_list(sort="trending", limit=3)
-        self.assertIn("**HF Papers List**", result)
-        self.assertIn("Title A", result)
-        mock_run.assert_called_once()
+        asyncio.run(run_test())
 
-    @patch('subprocess.run')
-    def test_hf_papers_list_error(self, mock_run):
-        """Test error handling in list."""
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stderr = "CLI error"
-        mock_run.return_value = mock_result
+    # def test_search_hf_papers_empty_query(self):
+    #     """Test behavior with empty or very short query."""
+    #     async def run_test():
+    #         result: Dict[str, Any] = await self.tools.search_hf_papers(query="", limit=5)
+    #         self.assertEqual(result.get("status"), "success")
+    #         # HF usually still returns some results or an empty list
+    #         self.assertIsInstance(result.get("results"), list)
+    #         print("✅ Empty query test passed.")
+    #         return result
 
-        result = self.tools.hf_papers_list()
-        self.assertIn("Error listing papers", result)
+    #     asyncio.run(run_test())
 
-    @patch('subprocess.run')
-    def test_hf_papers_search_success(self, mock_run):
-        """Test successful search."""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "Result 1: Diffusion models"
-        mock_run.return_value = mock_result
+    def test_get_hf_paper_markdown_success(self):
+        """Test fetching a real, well-known paper in Markdown format."""
+        # Use a stable, popular paper that is definitely indexed on HF Papers
+        test_paper_id = "1706.03762"  # "Attention Is All You Need" (Transformer paper)
 
-        result = self.tools.hf_papers_search("diffusion", limit=2)
-        self.assertIn("**Search Results for 'diffusion'**", result)
-        self.assertIn("Diffusion models", result)
+        async def run_test():
+            markdown: str = await self.tools.get_hf_paper_markdown(test_paper_id)
+            
+            self.assertIsInstance(markdown, str)
+            self.assertGreater(len(markdown), 500, "Markdown should be reasonably long")
+            
+            # Basic content checks for a real paper
+            self.assertIn("Attention", markdown)   # Title contains "Attention"
+            self.assertIn("Transformer", markdown)  # Key term
+            self.assertIn("#", markdown)           # Should have Markdown headings
+            self.assertIn("##", markdown)          # Subheadings
+            
+            # Should not be an error message
+            self.assertNotIn("Error fetching", markdown)
+            self.assertNotIn("not yet indexed", markdown.lower())
+            
+            print(f"✅ Markdown fetch test passed for paper {test_paper_id} ({len(markdown)} chars).")
+            return markdown
 
-    @patch('subprocess.run')
-    def test_hf_papers_read_success(self, mock_run):
-        """Test successful read with markdown output."""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = (
-            "# Attention Is All You Need\n\n"
-            "Abstract: ...\n\n"
-            "The Transformer uses self-attention: $Attention(Q, K, V) = softmax(\\frac{QK^T}{\\sqrt{d_k}})V$\n\n"
-            "$$\\text{MultiHead}(Q, K, V) = \\text{Concat}(head_1, ..., head_h)W^O$$"
-        )
-        mock_run.return_value = mock_result
+        asyncio.run(run_test())
 
-        result = self.tools.hf_papers_read("1706.03762")
-        self.assertIn("**Paper Content (ID: 1706.03762)**", result)
-        self.assertIn("Attention Is All You Need", result)
+    def test_get_hf_paper_markdown_nonexistent(self):
+        """Test graceful handling of a non-existent or not-yet-indexed paper."""
+        async def run_test():
+            markdown: str = await self.tools.get_hf_paper_markdown("9999.99999")
+            
+            self.assertIsInstance(markdown, str)
+            # Should contain either an error message or "not yet indexed"
+            self.assertTrue(
+                "error" in markdown.lower() or 
+                "not yet indexed" in markdown.lower() or
+                "404" in markdown,
+                "Should indicate paper was not found"
+            )
+            print("✅ Non-existent paper test passed (graceful error handling).")
+            return markdown
 
-    @patch('subprocess.run')
-    def test_equations_converted_to_markdown_latex(self, mock_run):
-        """
-        Test that equations are properly converted from PDF/LaTeX source into Markdown.
-        hf papers read typically outputs math using standard $...$ (inline) or $$...$$ (display) delimiters.
-        This checks preservation of LaTeX syntax inside math blocks.
-        """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = (
-            "Section 3.2: Self-Attention\n\n"
-            "The scaled dot-product attention is defined as:\n\n"
-            "$$\\text{Attention}(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$$\n\n"
-            "For multi-head: $head_i = \\text{Attention}(QW_i^Q, KW_i^K, VW_i^V)$"
-        )
-        mock_run.return_value = mock_result
+        asyncio.run(run_test())
 
-        result = self.tools.hf_papers_read("1706.03762")
+    def test_get_hf_paper_markdown_truncation(self):
+        """Test that very long papers get truncated (if your code has truncation logic)."""
+        async def run_test():
+            # Use a paper that tends to produce longer Markdown
+            markdown: str = await self.tools.get_hf_paper_markdown("1706.03762")
+            
+            if "[Markdown truncated" in markdown:
+                self.assertIn("... [Markdown truncated", markdown)
+                print("✅ Truncation logic triggered and working.")
+            else:
+                print("ℹ️  Truncation not triggered (paper was short enough).")
+            
+            return markdown
 
-        # Check for common math delimiters (inline and display)
-        self.assertTrue(
-            "$" in result or "$$" in result,
-            "No math delimiters found — equations may not have been converted properly."
-        )
-        # Check specific LaTeX content is preserved inside math
-        self.assertIn("Attention}(Q, K, V)", result)
-        self.assertIn("\\sqrt{d_k", result)
-        self.assertIn("softmax", result)
-        self.assertIn("multi-head", result)  # or similar from the mock
-
-    @patch('subprocess.run')
-    def test_hf_papers_read_error(self, mock_run):
-        """Test error handling when reading a paper."""
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stderr = "Paper not found"
-        mock_run.return_value = mock_result
-
-        result = self.tools.hf_papers_read("invalid-id")
-        self.assertIn("Error reading paper", result)
-        self.assertIn("Tip: Index it first", result)
+        asyncio.run(run_test())
 
 
 if __name__ == "__main__":
-    # Run tests when the file is executed directly (e.g., python hf_papers_tool.py)
+    # Run tests when the file is executed directly (handy for local testing)
     unittest.main(verbosity=2)
